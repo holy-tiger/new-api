@@ -31,6 +31,15 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return types.NewErrorWithStatusCode(fmt.Errorf("invalid request type, expected dto.GeneralOpenAIRequest, got %T", info.Request), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// [CACHE-DEBUG] 记录原始请求体（解析后、修改前）
+	if common.DebugEnabled {
+		if origBody, err := common.GetBodyStorage(c); err == nil {
+			if origBytes, bErr := origBody.Bytes(); bErr == nil {
+				logger.LogDebug(c, "[CACHE-DEBUG] 原始请求体: %s", string(origBytes))
+			}
+		}
+	}
+
 	request, err := common.DeepCopy(textReq)
 	if err != nil {
 		return types.NewError(fmt.Errorf("failed to copy request to GeneralOpenAIRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
@@ -45,6 +54,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
 
+	// [CACHE-DEBUG] 记录模型映射
+	logger.LogDebug(c, "[CACHE-DEBUG] 模型映射: origin=%s -> upstream=%s", info.OriginModelName, info.UpstreamModelName)
+
 	includeUsage := true
 	// 判断用户是否需要返回使用情况
 	if request.StreamOptions != nil {
@@ -53,10 +65,18 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 	// 如果不支持StreamOptions，将StreamOptions设置为nil
 	if !info.SupportStreamOptions || !lo.FromPtrOr(request.Stream, false) {
+		// [CACHE-DEBUG] 移除 stream_options
+		if request.StreamOptions != nil {
+			logger.LogDebug(c, "[CACHE-DEBUG] StreamOptions 被移除: 渠道不支持或非流式请求")
+		}
 		request.StreamOptions = nil
 	} else {
 		// 如果支持StreamOptions，且请求中没有设置StreamOptions，根据配置文件设置StreamOptions
 		if constant.ForceStreamOption {
+			// [CACHE-DEBUG] 注入 stream_options
+			if request.StreamOptions == nil {
+				logger.LogDebug(c, "[CACHE-DEBUG] StreamOptions 被注入: ForceStreamOption=true, 添加 include_usage=true")
+			}
 			request.StreamOptions = &dto.StreamOptions{
 				IncludeUsage: true,
 			}
@@ -115,6 +135,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 		if info.ChannelSetting.SystemPrompt != "" {
 			// 如果有系统提示，则将其添加到请求中
+			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词注入: channel_system_prompt=%q", info.ChannelSetting.SystemPrompt)
 			request, ok := convertedRequest.(*dto.GeneralOpenAIRequest)
 			if ok {
 				containSystemPrompt := false
@@ -126,6 +147,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				}
 				if !containSystemPrompt {
 					// 如果没有系统提示，则添加系统提示
+					logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 无已有system消息, 在messages前插入新的system消息(影响缓存前缀)")
 					systemMessage := dto.Message{
 						Role:    request.GetSystemRoleName(),
 						Content: info.ChannelSetting.SystemPrompt,
@@ -134,6 +156,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				} else if info.ChannelSetting.SystemPromptOverride {
 					common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
 					// 如果有系统提示，且允许覆盖，则拼接到前面
+					logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 已有system消息且Override=true, 修改第一条system消息内容(影响缓存前缀)")
 					for i, message := range request.Messages {
 						if message.Role == request.GetSystemRoleName() {
 							if message.IsStringContent() {
@@ -161,20 +184,30 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 
 		// remove disabled fields for OpenAI API
+		jsonDataBeforeDisabled := string(jsonData)
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		if string(jsonData) != jsonDataBeforeDisabled {
+			logger.LogDebug(c, "[CACHE-DEBUG] RemoveDisabledFields 修改了请求体(影响缓存): 修改前长度=%d, 修改后长度=%d", len(jsonDataBeforeDisabled), len(jsonData))
+		} else {
+			logger.LogDebug(c, "[CACHE-DEBUG] RemoveDisabledFields 未修改请求体")
+		}
 
 		// apply param override
 		if len(info.ParamOverride) > 0 {
+			jsonDataBeforeOverride := string(jsonData)
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+			if string(jsonData) != jsonDataBeforeOverride {
+				logger.LogDebug(c, "[CACHE-DEBUG] ParamOverride 修改了请求体(可能影响缓存): 修改前长度=%d, 修改后长度=%d", len(jsonDataBeforeOverride), len(jsonData))
+			}
 		}
 
-		logger.LogDebug(c, fmt.Sprintf("text request body: %s", string(jsonData)))
+		logger.LogDebug(c, "[CACHE-DEBUG] 最终发送请求体: %s", string(jsonData))
 
 		requestBody = bytes.NewBuffer(jsonData)
 	}

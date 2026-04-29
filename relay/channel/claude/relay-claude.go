@@ -730,6 +730,13 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Message.Usage.CacheCreationInputTokens
 			claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Message.Usage.GetCacheCreation5mTokens()
 			claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Message.Usage.GetCacheCreation1hTokens()
+			// [CACHE-DEBUG] 记录缓存命中情况
+			if common.DebugEnabled {
+				fmt.Printf("[CACHE-DEBUG] 流式响应缓存统计(stream message_start): input_tokens=%d, cache_read=%d, cache_creation=%d, cache_creation_5m=%d, cache_creation_1h=%d\n",
+					claudeResponse.Message.Usage.InputTokens, claudeResponse.Message.Usage.CacheReadInputTokens,
+					claudeResponse.Message.Usage.CacheCreationInputTokens,
+					claudeInfo.Usage.ClaudeCacheCreation5mTokens, claudeInfo.Usage.ClaudeCacheCreation1hTokens)
+			}
 			claudeInfo.Usage.CompletionTokens = claudeResponse.Message.Usage.OutputTokens
 		}
 	} else if claudeResponse.Type == "content_block_delta" {
@@ -763,6 +770,13 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			}
 			if claudeResponse.Usage.OutputTokens > 0 {
 				claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
+			}
+			// [CACHE-DEBUG] 记录最终缓存统计
+			if common.DebugEnabled {
+				fmt.Printf("[CACHE-DEBUG] 流式响应缓存统计(stream message_delta): input_tokens=%d, cache_read=%d, cache_creation=%d, output_tokens=%d\n",
+					claudeInfo.Usage.PromptTokens, claudeInfo.Usage.PromptTokensDetails.CachedTokens,
+					claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens,
+					claudeInfo.Usage.CompletionTokens)
 			}
 			claudeInfo.Usage.TotalTokens = claudeInfo.Usage.PromptTokens + claudeInfo.Usage.CompletionTokens
 		}
@@ -911,6 +925,14 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Usage.CacheCreationInputTokens
 		claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Usage.GetCacheCreation5mTokens()
 		claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Usage.GetCacheCreation1hTokens()
+		// [CACHE-DEBUG] 记录缓存命中情况
+		if common.DebugEnabled {
+			fmt.Printf("[CACHE-DEBUG] 非流式响应缓存统计: input_tokens=%d, cache_read=%d, cache_creation=%d, cache_creation_5m=%d, cache_creation_1h=%d, output_tokens=%d\n",
+				claudeResponse.Usage.InputTokens, claudeResponse.Usage.CacheReadInputTokens,
+				claudeResponse.Usage.CacheCreationInputTokens,
+				claudeInfo.Usage.ClaudeCacheCreation5mTokens, claudeInfo.Usage.ClaudeCacheCreation1hTokens,
+				claudeResponse.Usage.OutputTokens)
+		}
 	}
 	var responseData []byte
 	switch info.RelayFormat {

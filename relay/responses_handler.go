@@ -60,9 +60,23 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return types.NewError(fmt.Errorf("failed to copy request to GeneralOpenAIRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// [CACHE-DEBUG] 记录原始请求体（解析后、修改前）
+	if common.DebugEnabled {
+		if origBody, bErr := common.GetBodyStorage(c); bErr == nil {
+			if origBytes, bbErr := origBody.Bytes(); bbErr == nil {
+				fmt.Printf("[CACHE-DEBUG] [%s] 原始请求体: %s\n", c.GetString(common.RequestIdKey), string(origBytes))
+			}
+		}
+	}
+
 	err = helper.ModelMappedHelper(c, info, request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
+	}
+
+	// [CACHE-DEBUG] 记录模型映射
+	if common.DebugEnabled {
+		fmt.Printf("[CACHE-DEBUG] [%s] 模型映射: origin=%s -> upstream=%s\n", c.GetString(common.RequestIdKey), info.OriginModelName, info.UpstreamModelName)
 	}
 
 	adaptor := GetAdaptor(info.ApiType)
@@ -89,18 +103,31 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 
 		// remove disabled fields for OpenAI Responses API
+		jsonDataBeforeDisabled := string(jsonData)
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		if string(jsonData) != jsonDataBeforeDisabled {
+			fmt.Printf("[CACHE-DEBUG] [%s] RemoveDisabledFields 修改了请求体(影响缓存): 修改前长度=%d, 修改后长度=%d\n", c.GetString(common.RequestIdKey), len(jsonDataBeforeDisabled), len(jsonData))
+		} else {
+			fmt.Printf("[CACHE-DEBUG] [%s] RemoveDisabledFields 未修改请求体\n", c.GetString(common.RequestIdKey))
+		}
 
 		// apply param override
 		if len(info.ParamOverride) > 0 {
+			jsonDataBeforeOverride := string(jsonData)
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+			if string(jsonData) != jsonDataBeforeOverride {
+				fmt.Printf("[CACHE-DEBUG] [%s] ParamOverride 修改了请求体(可能影响缓存): 修改前长度=%d, 修改后长度=%d\n", c.GetString(common.RequestIdKey), len(jsonDataBeforeOverride), len(jsonData))
+			}
 		}
+
+		// [CACHE-DEBUG] 记录最终发送请求体
+		fmt.Printf("[CACHE-DEBUG] [%s] 最终发送请求体: %s\n", c.GetString(common.RequestIdKey), string(jsonData))
 
 		if common.DebugEnabled {
 			println("requestBody: ", string(jsonData))

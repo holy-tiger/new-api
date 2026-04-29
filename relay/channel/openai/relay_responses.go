@@ -52,6 +52,11 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if responsesResponse.Usage.InputTokensDetails != nil {
 			usage.PromptTokensDetails.CachedTokens = responsesResponse.Usage.InputTokensDetails.CachedTokens
 		}
+		// [CACHE-DEBUG] 记录缓存命中情况
+		if common.DebugEnabled {
+			fmt.Printf("[CACHE-DEBUG] 非流式Responses缓存统计: input_tokens=%d, cached_tokens=%d, output_tokens=%d\n",
+				responsesResponse.Usage.InputTokens, usage.PromptTokensDetails.CachedTokens, responsesResponse.Usage.OutputTokens)
+		}
 	}
 	if info == nil || info.ResponsesUsageInfo == nil || info.ResponsesUsageInfo.BuiltInTools == nil {
 		return &usage, nil
@@ -104,6 +109,11 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 					}
 					if streamResponse.Response.Usage.InputTokensDetails != nil {
 						usage.PromptTokensDetails.CachedTokens = streamResponse.Response.Usage.InputTokensDetails.CachedTokens
+					}
+					// [CACHE-DEBUG] 记录缓存命中情况
+					if common.DebugEnabled {
+						fmt.Printf("[CACHE-DEBUG] 流式Responses缓存统计: input_tokens=%d, cached_tokens=%d, output_tokens=%d\n",
+							usage.PromptTokens, usage.PromptTokensDetails.CachedTokens, usage.CompletionTokens)
 					}
 				}
 				if streamResponse.Response.HasImageGenerationCall() {

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
@@ -31,6 +32,15 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewErrorWithStatusCode(fmt.Errorf("invalid request type, expected *dto.ClaudeRequest, got %T", info.Request), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// [CACHE-DEBUG] 记录原始请求体（解析后、修改前）
+	if common.DebugEnabled {
+		if origBody, err := common.GetBodyStorage(c); err == nil {
+			if origBytes, bErr := origBody.Bytes(); bErr == nil {
+				logger.LogDebug(c, "[CACHE-DEBUG] 原始请求体: %s", string(origBytes))
+			}
+		}
+	}
+
 	request, err := common.DeepCopy(claudeReq)
 	if err != nil {
 		return types.NewError(fmt.Errorf("failed to copy request to ClaudeRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
@@ -40,6 +50,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
+
+	// [CACHE-DEBUG] 记录模型映射
+	logger.LogDebug(c, "[CACHE-DEBUG] 模型映射: origin=%s -> upstream=%s", info.OriginModelName, info.UpstreamModelName)
 
 	adaptor := GetAdaptor(info.ApiType)
 	if adaptor == nil {
@@ -104,10 +117,13 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	if info.ChannelSetting.SystemPrompt != "" {
+		logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词注入: channel_system_prompt=%q", info.ChannelSetting.SystemPrompt)
 		if request.System == nil {
+			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: request.System为nil, 设置channel系统提示词(影响缓存前缀)")
 			request.SetStringSystem(info.ChannelSetting.SystemPrompt)
 		} else if info.ChannelSetting.SystemPromptOverride {
 			common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 已有system且Override=true, 修改system内容(影响缓存前缀)")
 			if request.IsStringSystem() {
 				existing := strings.TrimSpace(request.GetStringSystem())
 				if existing == "" {
@@ -164,22 +180,30 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 
 		// remove disabled fields for Claude API
+		jsonDataBeforeDisabled := string(jsonData)
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		if string(jsonData) != jsonDataBeforeDisabled {
+			logger.LogDebug(c, "[CACHE-DEBUG] RemoveDisabledFields 修改了请求体(影响缓存): 修改前长度=%d, 修改后长度=%d", len(jsonDataBeforeDisabled), len(jsonData))
+		} else {
+			logger.LogDebug(c, "[CACHE-DEBUG] RemoveDisabledFields 未修改请求体")
+		}
 
 		// apply param override
 		if len(info.ParamOverride) > 0 {
+			jsonDataBeforeOverride := string(jsonData)
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+			if string(jsonData) != jsonDataBeforeOverride {
+				logger.LogDebug(c, "[CACHE-DEBUG] ParamOverride 修改了请求体(可能影响缓存): 修改前长度=%d, 修改后长度=%d", len(jsonDataBeforeOverride), len(jsonData))
+			}
 		}
 
-		if common.DebugEnabled {
-			println("requestBody: ", string(jsonData))
-		}
+		logger.LogDebug(c, "[CACHE-DEBUG] 最终发送请求体: %s", string(jsonData))
 		requestBody = bytes.NewBuffer(jsonData)
 	}
 
