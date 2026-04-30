@@ -65,6 +65,12 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 	"content-length":  {},
 	"accept-encoding": {},
 
+	// Adapters may force specific Content-Type and Accept values (e.g., the Codex adapter
+	// requires exactly "application/json" and rejects "application/json; charset=utf-8").
+	// Passthrough must not overwrite these adapter-forced values.
+	"content-type": {},
+	"accept":       {},
+
 	// Do not passthrough credentials by wildcard/regex.
 	"authorization":  {},
 	"x-api-key":      {},
@@ -311,6 +317,40 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
+
+	// [CACHE-DIAG] Log cache-relevant upstream request headers when debug is enabled.
+	// These headers are critical for prompt cache hit rate diagnosis:
+	// - Content-Type must be exactly "application/json" for Codex backend
+	// - Originator, Session_id, X-Codex-* headers affect server-side routing
+	// - chatgpt-account-id must match the correct account
+	if common2.DebugEnabled {
+		var cacheDiagHeaders []string
+		for _, h := range []string{
+			"Content-Type", "Accept", "Originator", "Session_id",
+			"X-Codex-Beta-Features", "X-Codex-Turn-Metadata",
+			"chatgpt-account-id", "OpenAI-Beta",
+		} {
+			if v := req.Header.Get(h); v != "" {
+				cacheDiagHeaders = append(cacheDiagHeaders, h+"="+v)
+			}
+		}
+		if len(info.RuntimeHeadersOverride) > 0 {
+			keys := make([]string, 0, len(info.RuntimeHeadersOverride))
+			for k := range info.RuntimeHeadersOverride {
+				keys = append(keys, k)
+			}
+			cacheDiagHeaders = append(cacheDiagHeaders, "runtime_header_override_keys="+strings.Join(keys, ","))
+		}
+		if len(headerOverride) > 0 {
+			keys := make([]string, 0, len(headerOverride))
+			for k := range headerOverride {
+				keys = append(keys, k)
+			}
+			cacheDiagHeaders = append(cacheDiagHeaders, "header_override_keys="+strings.Join(keys, ","))
+		}
+		logger.LogDebug(c, "[CACHE-DIAG] upstream headers: %s", strings.Join(cacheDiagHeaders, ", "))
+	}
+
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)

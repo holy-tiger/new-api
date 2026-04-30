@@ -14,6 +14,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/types"
+	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -178,6 +179,18 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 		req.Set("originator", "codex_cli_rs")
 	}
 
+	// Codex CLI sends a "session_id" header set to the conversation_id (which is the
+	// prompt_cache_key in the request body). The OpenAI Codex backend uses this header
+	// for request routing and prompt cache locality — requests with the same session_id
+	// are routed to the same backend node, enabling cache hits.
+	// If session_id is not already set (e.g., via affinity rule pass_headers), extract
+	// prompt_cache_key from the request body and set it.
+	if req.Get("session_id") == "" {
+		if pck := extractPromptCacheKey(c); pck != "" {
+			req.Set("session_id", pck)
+		}
+	}
+
 	// chatgpt.com/backend-api/codex/responses is strict about Content-Type.
 	// Clients may omit it or include parameters like `application/json; charset=utf-8`,
 	// which can be rejected by the upstream. Force the exact media type.
@@ -189,4 +202,23 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	}
 
 	return nil
+}
+
+// extractPromptCacheKey extracts the prompt_cache_key from the request body stored
+// in the gin context's BodyStorage. This is used to set the session_id header for
+// Codex backend routing, matching Codex CLI's build_conversation_headers behavior.
+func extractPromptCacheKey(c *gin.Context) string {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return ""
+	}
+	bodyBytes, err := storage.Bytes()
+	if err != nil || len(bodyBytes) == 0 {
+		return ""
+	}
+	result := gjson.GetBytes(bodyBytes, "prompt_cache_key")
+	if result.Exists() {
+		return result.String()
+	}
+	return ""
 }

@@ -10,12 +10,15 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/types"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -60,23 +63,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return types.NewError(fmt.Errorf("failed to copy request to GeneralOpenAIRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
-	// [CACHE-DEBUG] 记录原始请求体（解析后、修改前）
-	if common.DebugEnabled {
-		if origBody, bErr := common.GetBodyStorage(c); bErr == nil {
-			if origBytes, bbErr := origBody.Bytes(); bbErr == nil {
-				fmt.Printf("[CACHE-DEBUG] [%s] 原始请求体: %s\n", c.GetString(common.RequestIdKey), string(origBytes))
-			}
-		}
-	}
-
 	err = helper.ModelMappedHelper(c, info, request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
-	}
-
-	// [CACHE-DEBUG] 记录模型映射
-	if common.DebugEnabled {
-		fmt.Printf("[CACHE-DEBUG] [%s] 模型映射: origin=%s -> upstream=%s\n", c.GetString(common.RequestIdKey), info.OriginModelName, info.UpstreamModelName)
 	}
 
 	adaptor := GetAdaptor(info.ApiType)
@@ -90,7 +79,32 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.ReaderOnly(storage)
+
+		bodyBytes, _ := storage.Bytes()
+		if len(bodyBytes) > 0 {
+			// Apply adapter-specific body fixes even in passthrough mode.
+			// For Codex channels, the backend requires certain body fields (e.g., store=false)
+			// that must be enforced regardless of passthrough setting.
+			bodyBytes, err = applyAdapterPassthroughBodyFixes(bodyBytes, info)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			requestBody = bytes.NewBuffer(bodyBytes)
+		} else {
+			requestBody = common.ReaderOnly(storage)
+		}
+
+		// Even with body passthrough, apply param override for header operations
+		// (e.g., affinity rule's pass_headers for Originator, Session_id, etc.)
+		// The body modifications are discarded since we use the raw body above.
+		if len(info.ParamOverride) > 0 {
+			if len(bodyBytes) > 0 {
+				_, err = relaycommon.ApplyParamOverrideWithRelayInfo(bodyBytes, info)
+				if err != nil {
+					return newAPIErrorFromParamOverride(err)
+				}
+			}
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
@@ -103,37 +117,32 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 
 		// remove disabled fields for OpenAI Responses API
-		jsonDataBeforeDisabled := string(jsonData)
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		if string(jsonData) != jsonDataBeforeDisabled {
-			fmt.Printf("[CACHE-DEBUG] [%s] RemoveDisabledFields 修改了请求体(影响缓存): 修改前长度=%d, 修改后长度=%d\n", c.GetString(common.RequestIdKey), len(jsonDataBeforeDisabled), len(jsonData))
-		} else {
-			fmt.Printf("[CACHE-DEBUG] [%s] RemoveDisabledFields 未修改请求体\n", c.GetString(common.RequestIdKey))
-		}
 
 		// apply param override
 		if len(info.ParamOverride) > 0 {
-			jsonDataBeforeOverride := string(jsonData)
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
-			if string(jsonData) != jsonDataBeforeOverride {
-				fmt.Printf("[CACHE-DEBUG] [%s] ParamOverride 修改了请求体(可能影响缓存): 修改前长度=%d, 修改后长度=%d\n", c.GetString(common.RequestIdKey), len(jsonDataBeforeOverride), len(jsonData))
-			}
 		}
-
-		// [CACHE-DEBUG] 记录最终发送请求体
-		fmt.Printf("[CACHE-DEBUG] [%s] 最终发送请求体: %s\n", c.GetString(common.RequestIdKey), string(jsonData))
 
 		if common.DebugEnabled {
 			println("requestBody: ", string(jsonData))
 		}
 		requestBody = bytes.NewBuffer(jsonData)
 	}
+
+	// [CACHE-DIAG] Log cache-relevant request body fields (not the full body) for diagnosis.
+	// These fields are critical for prompt cache hit rate:
+	// - prompt_cache_key: the cache key sent by client (used for affinity routing)
+	// - store: must be consistent (Codex adapter forces false)
+	// - previous_response_id: linked conversation for server-side cache
+	// - model: the resolved upstream model name
+	logCacheDiagFields(c, info, requestBody)
 
 	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, info, requestBody)
@@ -185,4 +194,121 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+// applyAdapterPassthroughBodyFixes applies adapter-specific body transformations that
+// are necessary even when body passthrough is enabled. When passthrough mode skips the
+// adapter's ConvertOpenAIResponsesRequest, certain backend-required fields may be missing
+// or incorrect (e.g., Codex backend requires store=false). This function applies minimal
+// JSON fixes using gjson/sjson to avoid a full unmarshal/marshal cycle.
+func applyAdapterPassthroughBodyFixes(bodyBytes []byte, info *relaycommon.RelayInfo) ([]byte, error) {
+	if len(bodyBytes) == 0 || info == nil {
+		return bodyBytes, nil
+	}
+
+	// Only apply fixes for Codex channel type (57)
+	if info.ChannelType != appconstant.ChannelTypeCodex {
+		return bodyBytes, nil
+	}
+
+	isCompact := info.RelayMode == relayconstant.RelayModeResponsesCompact
+	var err error
+
+	// Codex backend requires the "instructions" field to be present.
+	// If missing, default to empty string (matching Codex CLI behavior).
+	if !gjson.GetBytes(bodyBytes, "instructions").Exists() {
+		bodyBytes, err = sjson.SetBytes(bodyBytes, "instructions", "")
+		if err != nil {
+			return bodyBytes, err
+		}
+	}
+
+	if !isCompact {
+		// codex: store must be false
+		bodyBytes, err = sjson.SetBytes(bodyBytes, "store", false)
+		if err != nil {
+			return bodyBytes, err
+		}
+		// Remove max_output_tokens (Codex backend doesn't accept it)
+		if gjson.GetBytes(bodyBytes, "max_output_tokens").Exists() {
+			bodyBytes, err = sjson.DeleteBytes(bodyBytes, "max_output_tokens")
+			if err != nil {
+				return bodyBytes, err
+			}
+		}
+		// Remove temperature (Codex backend doesn't accept it)
+		if gjson.GetBytes(bodyBytes, "temperature").Exists() {
+			bodyBytes, err = sjson.DeleteBytes(bodyBytes, "temperature")
+			if err != nil {
+				return bodyBytes, err
+			}
+		}
+	}
+
+	return bodyBytes, nil
+}
+
+// logCacheDiagFields logs cache-relevant fields from the request body for prompt cache diagnosis.
+// It extracts only key fields (prompt_cache_key, store, previous_response_id, model, service_tier,
+// safety_identifier) without printing the full body, which could be very large.
+func logCacheDiagFields(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) {
+	if !common.DebugEnabled {
+		return
+	}
+
+	// Try to extract body bytes for field extraction.
+	var bodyBytes []byte
+	switch v := requestBody.(type) {
+	case *bytes.Buffer:
+		bodyBytes = v.Bytes()
+	default:
+		// For passthrough mode, requestBody is a wrapped *bytes.Buffer that we can't easily read.
+		// Fall back to extracting from the body storage instead.
+		if storage, err := common.GetBodyStorage(c); err == nil {
+			if bs, bsErr := storage.Bytes(); bsErr == nil {
+				bodyBytes = bs
+			}
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		logger.LogDebug(c, "[CACHE-DIAG] could not extract body bytes for diagnosis")
+		return
+	}
+
+	var fields []string
+	fields = append(fields, "model="+gjson.GetBytes(bodyBytes, "model").String())
+
+	if pck := gjson.GetBytes(bodyBytes, "prompt_cache_key"); pck.Exists() {
+		fields = append(fields, "prompt_cache_key="+pck.String())
+	}
+	if store := gjson.GetBytes(bodyBytes, "store"); store.Exists() {
+		fields = append(fields, "store="+store.String())
+	}
+	if prevID := gjson.GetBytes(bodyBytes, "previous_response_id"); prevID.Exists() {
+		fields = append(fields, "previous_response_id="+prevID.String())
+	}
+	if st := gjson.GetBytes(bodyBytes, "service_tier"); st.Exists() {
+		fields = append(fields, "service_tier="+st.String())
+	}
+	if si := gjson.GetBytes(bodyBytes, "safety_identifier"); si.Exists() {
+		fields = append(fields, "safety_identifier="+si.String())
+	}
+
+	// Body size indicates whether the request is large enough for meaningful caching
+	fields = append(fields, fmt.Sprintf("body_len=%d", len(bodyBytes)))
+
+	// Channel info for affinity diagnosis
+	fields = append(fields, fmt.Sprintf("channel_id=%d channel_type=%d passthrough_body=%v param_override=%d",
+		info.ChannelId, info.ChannelType, info.ChannelSetting.PassThroughBodyEnabled, len(info.ParamOverride)))
+
+	if info.UseRuntimeHeadersOverride {
+		keys := make([]string, 0, len(info.RuntimeHeadersOverride))
+		for k := range info.RuntimeHeadersOverride {
+			keys = append(keys, k)
+		}
+		fields = append(fields, "runtime_header_override_keys="+strings.Join(keys, ","))
+	}
+
+	logger.LogDebug(c, "[CACHE-DIAG] %s", strings.Join(fields, " | "))
 }

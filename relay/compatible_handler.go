@@ -126,6 +126,19 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			}
 		}
 		requestBody = common.ReaderOnly(storage)
+
+		// Even with body passthrough, apply param override for header operations
+		// (e.g., affinity rule's pass_headers for Originator, Session_id, etc.)
+		// The body modifications are discarded since we use the raw body above.
+		if len(info.ParamOverride) > 0 {
+			bodyBytes, _ := storage.Bytes()
+			if len(bodyBytes) > 0 {
+				_, err = relaycommon.ApplyParamOverrideWithRelayInfo(bodyBytes, info)
+				if err != nil {
+					return newAPIErrorFromParamOverride(err)
+				}
+			}
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
 		if err != nil {
