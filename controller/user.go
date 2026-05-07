@@ -850,6 +850,7 @@ func CreateUser(c *gin.Context) {
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
 		Email:       user.Email,
+		Group:       user.Group,
 		Role:        user.Role, // 保持管理员设置的角色
 	}
 	if err := cleanUser.Insert(0); err != nil {
@@ -877,7 +878,9 @@ func CreateUser(c *gin.Context) {
 			UnlimitedQuota:     true,
 			ModelLimitsEnabled: false,
 		}
-		if setting.DefaultUseAutoGroup {
+		if cleanUser.Group != "" {
+			token.Group = cleanUser.Group
+		} else if setting.DefaultUseAutoGroup {
 			token.Group = "auto"
 		}
 		if err := token.Insert(); err != nil {

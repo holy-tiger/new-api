@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { API, showError, showSuccess } from '../../../../helpers';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
 import {
@@ -42,6 +42,7 @@ const AddUserModal = (props) => {
   const { t } = useTranslation();
   const formApiRef = useRef(null);
   const [loading, setLoading] = useState(false);
+  const [groupOptions, setGroupOptions] = useState([]);
   const isMobile = useIsMobile();
 
   const getInitValues = () => ({
@@ -49,8 +50,22 @@ const AddUserModal = (props) => {
     display_name: '',
     email: '',
     password: '',
+    group: 'default',
     remark: '',
   });
+
+  const fetchGroups = async () => {
+    try {
+      let res = await API.get(`/api/group/`);
+      setGroupOptions(res.data.data.map((g) => ({ label: g, value: g })));
+    } catch (error) {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    fetchGroups();
+  }, []);
 
   const submit = async (values) => {
     setLoading(true);
@@ -163,6 +178,17 @@ const AddUserModal = (props) => {
                       placeholder={t('请输入邮箱（用于接收通知和欢迎邮件）')}
                       rules={[{ type: 'email', message: t('请输入有效的邮箱地址') }]}
                       showClear
+                    />
+                  </Col>
+                  <Col span={24}>
+                    <Form.Select
+                      field='group'
+                      label={t('分组')}
+                      placeholder={t('请选择分组')}
+                      optionList={groupOptions}
+                      allowAdditions
+                      search
+                      rules={[{ required: true, message: t('请选择分组') }]}
                     />
                   </Col>
                   <Col span={24}>
