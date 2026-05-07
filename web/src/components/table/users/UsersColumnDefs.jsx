@@ -216,6 +216,7 @@ const renderOperations = (
     showResetPasskeyModal,
     showResetTwoFAModal,
     showUserSubscriptionsModal,
+    resendWelcomeEmail,
     t,
   },
 ) => {
@@ -229,6 +230,17 @@ const renderOperations = (
       name: t('订阅管理'),
       onClick: () => showUserSubscriptionsModal(record),
     },
+  ];
+
+  if (record.email) {
+    moreMenu.push({
+      node: 'item',
+      name: t('重发欢迎邮件'),
+      onClick: () => resendWelcomeEmail(record),
+    });
+  }
+
+  moreMenu.push(
     {
       node: 'divider',
     },
@@ -251,7 +263,7 @@ const renderOperations = (
       type: 'danger',
       onClick: () => showDeleteModal(record),
     },
-  ];
+  );
 
   return (
     <Space>
@@ -316,6 +328,7 @@ export const getUsersColumns = ({
   showResetPasskeyModal,
   showResetTwoFAModal,
   showUserSubscriptionsModal,
+  resendWelcomeEmail,
 }) => {
   return [
     {
@@ -383,6 +396,7 @@ export const getUsersColumns = ({
           showResetPasskeyModal,
           showResetTwoFAModal,
           showUserSubscriptionsModal,
+          resendWelcomeEmail,
           t,
         }),
     },

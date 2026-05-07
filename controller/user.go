@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 
 	"github.com/QuantumNous/new-api/constant"
+	operation_setting "github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -802,6 +803,27 @@ func DeleteSelf(c *gin.Context) {
 	return
 }
 
+func sendWelcomeEmail(email string, username string, tokenKey string) {
+	subject := fmt.Sprintf("%s - 欢迎使用", common.SystemName)
+	content := fmt.Sprintf("<p>您好 %s，</p>"+
+		"<p>管理员已为您创建了 <strong>%s</strong> 账号。</p>",
+		username, common.SystemName)
+
+	if tokenKey != "" {
+		content += fmt.Sprintf("<p>您的 API 密钥为：<code style=\"background:#f0f0f0;padding:2px 6px;border-radius:3px;\">%s</code></p>"+
+			"<p>请妥善保管您的密钥，不要泄露给他人。</p>", tokenKey)
+	}
+
+	docsLink := operation_setting.GetGeneralSetting().DocsLink
+	if docsLink != "" {
+		content += fmt.Sprintf("<p>配置文档：<a href='%s'>%s</a></p>", docsLink, docsLink)
+	}
+
+	if err := common.SendEmail(subject, email, content); err != nil {
+		common.SysLog(fmt.Sprintf("failed to send welcome email to %s: %s", email, err.Error()))
+	}
+}
+
 func CreateUser(c *gin.Context) {
 	var user model.User
 	err := json.NewDecoder(c.Request.Body).Decode(&user)
@@ -827,6 +849,7 @@ func CreateUser(c *gin.Context) {
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
+		Email:       user.Email,
 		Role:        user.Role, // 保持管理员设置的角色
 	}
 	if err := cleanUser.Insert(0); err != nil {
@@ -834,11 +857,78 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
+	// 生成默认令牌
+	var defaultTokenKey string
+	if constant.GenerateDefaultToken {
+		key, err := common.GenerateKey()
+		if err != nil {
+			common.ApiErrorI18n(c, i18n.MsgUserDefaultTokenFailed)
+			common.SysLog("failed to generate token key: " + err.Error())
+			return
+		}
+		token := model.Token{
+			UserId:             cleanUser.Id,
+			Name:               cleanUser.Username + "的初始令牌",
+			Key:                key,
+			CreatedTime:        common.GetTimestamp(),
+			AccessedTime:       common.GetTimestamp(),
+			ExpiredTime:        -1,
+			RemainQuota:        500000,
+			UnlimitedQuota:     true,
+			ModelLimitsEnabled: false,
+		}
+		if setting.DefaultUseAutoGroup {
+			token.Group = "auto"
+		}
+		if err := token.Insert(); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgCreateDefaultTokenErr)
+			return
+		}
+		defaultTokenKey = key
+	}
+
+	// 发送欢迎邮件
+	if cleanUser.Email != "" {
+		go sendWelcomeEmail(cleanUser.Email, cleanUser.Username, defaultTokenKey)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 	})
 	return
+}
+
+type ResendEmailRequest struct {
+	Id int `json:"id"`
+}
+
+func ResendWelcomeEmail(c *gin.Context) {
+	var req ResendEmailRequest
+	if err := json.NewDecoder(c.Request.Body).Decode(&req); err != nil || req.Id == 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	user, err := model.GetUserById(req.Id, false)
+	if err != nil {
+		common.ApiError(c, fmt.Errorf("user not found"))
+		return
+	}
+	if user.Email == "" {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	// 查询用户最新的 token key
+	var tokenKey string
+	tokens, err := model.GetAllUserTokens(user.Id, 0, 1)
+	if err == nil && len(tokens) > 0 {
+		tokenKey = tokens[0].Key
+	}
+	go sendWelcomeEmail(user.Email, user.Username, tokenKey)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
 }
 
 type ManageRequest struct {

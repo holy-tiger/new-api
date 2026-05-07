@@ -47,6 +47,7 @@ const AddUserModal = (props) => {
   const getInitValues = () => ({
     username: '',
     display_name: '',
+    email: '',
     password: '',
     remark: '',
   });
@@ -152,6 +153,15 @@ const AddUserModal = (props) => {
                       field='display_name'
                       label={t('显示名称')}
                       placeholder={t('请输入显示名称')}
+                      showClear
+                    />
+                  </Col>
+                  <Col span={24}>
+                    <Form.Input
+                      field='email'
+                      label={t('邮箱')}
+                      placeholder={t('请输入邮箱（用于接收通知和欢迎邮件）')}
+                      rules={[{ type: 'email', message: t('请输入有效的邮箱地址') }]}
                       showClear
                     />
                   </Col>

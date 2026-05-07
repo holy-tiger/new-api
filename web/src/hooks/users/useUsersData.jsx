@@ -188,6 +188,23 @@ export const useUsersData = () => {
     }
   };
 
+  const resendWelcomeEmail = async (user) => {
+    if (!user) {
+      return;
+    }
+    try {
+      const res = await API.post('/api/user/resend_email', { id: user.id });
+      const { success, message } = res.data;
+      if (success) {
+        showSuccess(t('欢迎邮件已发送'));
+      } else {
+        showError(message || t('操作失败，请重试'));
+      }
+    } catch (error) {
+      showError(t('操作失败，请重试'));
+    }
+  };
+
   // Handle page change
   const handlePageChange = (page) => {
     setActivePage(page);
@@ -307,6 +324,7 @@ export const useUsersData = () => {
     manageUser,
     resetUserPasskey,
     resetUserTwoFA,
+    resendWelcomeEmail,
     handlePageChange,
     handlePageSizeChange,
     handleRow,
