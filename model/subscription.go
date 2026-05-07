@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/samber/hot"
 	"gorm.io/gorm"
@@ -836,34 +838,98 @@ func ExpireDueSubscriptions(limit int) (int, error) {
 		return 0, nil
 	}
 	expiredCount := 0
-	userIds := make(map[int]struct{}, len(subs))
+	renewedCount := 0
+
+	// Batch load plans for all due subscriptions.
+	planIds := make(map[int]struct{}, len(subs))
 	for _, sub := range subs {
-		if sub.UserId > 0 {
-			userIds[sub.UserId] = struct{}{}
+		planIds[sub.PlanId] = struct{}{}
+	}
+	plans := make(map[int]*SubscriptionPlan, len(planIds))
+	for pid := range planIds {
+		p, err := getSubscriptionPlanByIdTx(nil, pid)
+		if err != nil || p == nil {
+			continue
+		}
+		plans[pid] = p
+	}
+
+	// Group subscriptions by userId, separating renewable (free) from expirable.
+	type userDueSubs struct {
+		renewable []UserSubscription
+		expirable []UserSubscription
+	}
+	userMap := make(map[int]*userDueSubs, len(subs))
+	for _, sub := range subs {
+		if sub.UserId <= 0 {
+			continue
+		}
+		if _, ok := userMap[sub.UserId]; !ok {
+			userMap[sub.UserId] = &userDueSubs{}
+		}
+		plan := plans[sub.PlanId]
+		if plan != nil && plan.PriceAmount == 0 {
+			userMap[sub.UserId].renewable = append(userMap[sub.UserId].renewable, sub)
+		} else {
+			userMap[sub.UserId].expirable = append(userMap[sub.UserId].expirable, sub)
 		}
 	}
-	for userId := range userIds {
+
+	for userId, dueSubs := range userMap {
 		cacheGroup := ""
 		err := DB.Transaction(func(tx *gorm.DB) error {
-			res := tx.Model(&UserSubscription{}).
-				Where("user_id = ? AND status = ? AND end_time > 0 AND end_time <= ?", userId, "active", now).
-				Updates(map[string]interface{}{
-					"status":     "expired",
-					"updated_at": common.GetTimestamp(),
-				})
-			if res.Error != nil {
-				return res.Error
+			// Renew free subscriptions.
+			for _, sub := range dueSubs.renewable {
+				plan := plans[sub.PlanId]
+				if plan == nil {
+					continue
+				}
+				// Re-fetch with FOR UPDATE lock inside transaction.
+				var locked UserSubscription
+				if err := tx.Set("gorm:query_option", "FOR UPDATE").
+					Where("id = ? AND status = ?", sub.Id, "active").
+					First(&locked).Error; err != nil {
+					continue
+				}
+				if err := renewUserSubscriptionTx(tx, &locked, plan, now); err != nil {
+					logger.LogWarn(context.Background(), fmt.Sprintf("auto-renew subscription %d failed: %v", locked.Id, err))
+					// Fall through to expire if renewal fails.
+					if res := tx.Model(&UserSubscription{}).Where("id = ?", locked.Id).
+						Updates(map[string]interface{}{"status": "expired", "updated_at": common.GetTimestamp()}); res.Error != nil {
+						return res.Error
+					}
+					expiredCount++
+				} else {
+					renewedCount++
+				}
 			}
-			expiredCount += int(res.RowsAffected)
 
-			// If there's an active upgraded subscription, keep current group.
+			// Expire non-free subscriptions.
+			if len(dueSubs.expirable) > 0 {
+				expirableIds := make([]int, 0, len(dueSubs.expirable))
+				for _, sub := range dueSubs.expirable {
+					expirableIds = append(expirableIds, sub.Id)
+				}
+				res := tx.Model(&UserSubscription{}).
+					Where("id IN ? AND status = ?", expirableIds, "active").
+					Updates(map[string]interface{}{
+						"status":     "expired",
+						"updated_at": common.GetTimestamp(),
+					})
+				if res.Error != nil {
+					return res.Error
+				}
+				expiredCount += int(res.RowsAffected)
+			}
+
+			// If there's an active upgraded subscription (including just-renewed ones), keep current group.
 			var activeSub UserSubscription
 			activeQuery := tx.Where("user_id = ? AND status = ? AND end_time > ? AND upgrade_group <> ''",
 				userId, "active", now).
 				Order("end_time desc, id desc").
 				Limit(1).
 				Find(&activeSub)
-			if activeQuery.Error == nil && activeQuery.RowsAffected > 0 {
+			if activeQuery.Error == nil && activeSub.Id > 0 {
 				return nil
 			}
 
@@ -874,7 +940,7 @@ func ExpireDueSubscriptions(limit int) (int, error) {
 				Order("end_time desc, id desc").
 				Limit(1).
 				Find(&lastExpired)
-			if expiredQuery.Error != nil || expiredQuery.RowsAffected == 0 {
+			if expiredQuery.Error != nil || lastExpired.Id == 0 {
 				return nil
 			}
 			upgradeGroup := strings.TrimSpace(lastExpired.UpgradeGroup)
@@ -903,7 +969,41 @@ func ExpireDueSubscriptions(limit int) (int, error) {
 			_ = UpdateUserGroupCache(userId, cacheGroup)
 		}
 	}
+	if common.DebugEnabled && (expiredCount > 0 || renewedCount > 0) {
+		logger.LogDebug(context.Background(), "subscription expire task: expired=%d, renewed=%d", expiredCount, renewedCount)
+	}
 	return expiredCount, nil
+}
+
+// renewUserSubscriptionTx auto-renews a free subscription by extending end_time and resetting quota.
+func renewUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan, now int64) error {
+	if tx == nil || sub == nil || plan == nil {
+		return errors.New("invalid renew args")
+	}
+	// Extend end_time from the old end_time by one plan duration.
+	oldEnd := sub.EndTime
+	newEnd, err := calcPlanEndTime(time.Unix(oldEnd, 0), plan)
+	if err != nil {
+		return fmt.Errorf("calc new end_time: %w", err)
+	}
+
+	sub.StartTime = oldEnd
+	sub.EndTime = newEnd
+	sub.AmountTotal = plan.TotalAmount
+	sub.AmountUsed = 0
+
+	// Recalculate reset times for the new period.
+	// The new period starts at oldEnd and ends at newEnd.
+	if NormalizeResetPeriod(plan.QuotaResetPeriod) != SubscriptionResetNever {
+		sub.LastResetTime = oldEnd
+		sub.NextResetTime = calcNextResetTime(time.Unix(oldEnd, 0), plan, newEnd)
+	} else {
+		sub.LastResetTime = 0
+		sub.NextResetTime = 0
+	}
+
+	sub.UpdatedAt = common.GetTimestamp()
+	return tx.Save(sub).Error
 }
 
 // SubscriptionPreConsumeRecord stores idempotent pre-consume operations per request.
