@@ -15,7 +15,7 @@
 
 services:
   new-api:
-    image: new-api:cache-debug
+    image: new-api:release
     container_name: new-api
     restart: always
     command: --log-dir /app/logs

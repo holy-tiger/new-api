@@ -810,7 +810,7 @@ func sendWelcomeEmail(email string, username string, tokenKey string) {
 		username, common.SystemName)
 
 	if tokenKey != "" {
-		content += fmt.Sprintf("<p>您的 API 密钥为：<code style=\"background:#f0f0f0;padding:2px 6px;border-radius:3px;\">%s</code></p>"+
+		content += fmt.Sprintf("<p>您的 API 密钥为：<code style=\"background:#f0f0f0;padding:2px 6px;border-radius:3px;\">sk-%s</code></p>"+
 			"<p>请妥善保管您的密钥，不要泄露给他人。</p>", tokenKey)
 	}
 
