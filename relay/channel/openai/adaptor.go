@@ -162,6 +162,11 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url := info.ChannelBaseUrl
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
+	case constant.ChannelTypeCodeBuddy:
+		if info.RelayMode == relayconstant.RelayModeChatCompletions {
+			return fmt.Sprintf("%s/v2/chat/completions", info.ChannelBaseUrl), nil
+		}
+		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
 	default:
 		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
 			info.RelayMode != relayconstant.RelayModeResponses &&
@@ -222,6 +227,16 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *
 		if header.Get("X-OpenRouter-Title") == "" {
 			header.Set("X-OpenRouter-Title", "New API")
 		}
+	}
+	if info.ChannelType == constant.ChannelTypeCodeBuddy {
+		header.Set("X-Api-Key", info.ApiKey)
+		header.Set("X-Product", "SaaS")
+		header.Set("X-IDE-Type", "CLI")
+		header.Set("X-IDE-Name", "CLI")
+		header.Set("X-IDE-Version", "2.83.1")
+		conversationId := common.GetUUID()
+		header.Set("X-Conversation-ID", conversationId)
+		header.Set("X-Conversation-Request-ID", common.GetUUID())
 	}
 	return nil
 }
@@ -343,6 +358,14 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			if len(request.Messages) > 0 && request.Messages[0].Role == "system" {
 				request.Messages[0].Role = "developer"
 			}
+		}
+	}
+
+	if info.ChannelType == constant.ChannelTypeCodeBuddy {
+		streamTrue := true
+		request.Stream = &streamTrue
+		request.StreamOptions = &dto.StreamOptions{
+			IncludeUsage: true,
 		}
 	}
 
@@ -626,7 +649,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		usage, err = OaiResponsesCompactionHandler(c, resp)
 	default:
 		if info.IsStream {
-			usage, err = OaiStreamHandler(c, info, resp)
+			if info.ForceUpstreamStream && !info.OriginalClientStream {
+				usage, err = OaiStreamAggregationHandler(c, info, resp)
+			} else {
+				usage, err = OaiStreamHandler(c, info, resp)
+			}
 		} else {
 			usage, err = OpenaiHandler(c, info, resp)
 		}
