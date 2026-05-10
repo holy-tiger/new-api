@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -23,6 +24,31 @@ func TestCodeBuddy_GetRequestURL(t *testing.T) {
 	adaptor := &Adaptor{}
 	info := &relaycommon.RelayInfo{
 		RelayMode: relayconstant.RelayModeChatCompletions,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:    constant.ChannelTypeCodeBuddy,
+			ChannelBaseUrl: "https://codebuddy.example.com",
+		},
+	}
+
+	adaptor.Init(info)
+	url, err := adaptor.GetRequestURL(info)
+	if err != nil {
+		t.Fatalf("GetRequestURL returned error: %v", err)
+	}
+
+	want := "https://codebuddy.example.com/v2/chat/completions"
+	if url != want {
+		t.Fatalf("GetRequestURL() = %q, want %q", url, want)
+	}
+}
+
+func TestCodeBuddy_GetRequestURL_ClaudeFormat(t *testing.T) {
+	t.Parallel()
+
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		RelayFormat: types.RelayFormatClaude,
+		RelayMode:   relayconstant.RelayModeUnknown, // /v1/messages doesn't match Path2RelayMode
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelType:    constant.ChannelTypeCodeBuddy,
 			ChannelBaseUrl: "https://codebuddy.example.com",

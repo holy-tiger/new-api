@@ -163,7 +163,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
 	case constant.ChannelTypeCodeBuddy:
-		if info.RelayMode == relayconstant.RelayModeChatCompletions {
+		if info.RelayMode == relayconstant.RelayModeChatCompletions || info.RelayFormat == types.RelayFormatClaude {
 			return fmt.Sprintf("%s/v2/chat/completions", info.ChannelBaseUrl), nil
 		}
 		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
