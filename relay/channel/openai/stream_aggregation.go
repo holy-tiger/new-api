@@ -186,10 +186,21 @@ func OaiStreamAggregationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 
 	applyUsagePostProcessing(info, usage, nil)
 
-	// Write as JSON
-	respBody, err := common.Marshal(response)
-	if err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+	// Write response — convert to Claude format if the client used Claude API
+	var respBody []byte
+	if info.RelayFormat == types.RelayFormatClaude {
+		claudeResp := service.ResponseOpenAI2Claude(&response, info)
+		var marshalErr error
+		respBody, marshalErr = common.Marshal(claudeResp)
+		if marshalErr != nil {
+			return nil, types.NewOpenAIError(marshalErr, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+		}
+	} else {
+		var marshalErr error
+		respBody, marshalErr = common.Marshal(response)
+		if marshalErr != nil {
+			return nil, types.NewOpenAIError(marshalErr, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+		}
 	}
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)

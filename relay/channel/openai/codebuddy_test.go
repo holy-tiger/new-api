@@ -326,3 +326,59 @@ func TestCodeBuddy_StreamAggregation_NonStreamClient(t *testing.T) {
 		t.Errorf("FinishReason = %q, want stop", response.Choices[0].FinishReason)
 	}
 }
+
+func TestCodeBuddy_StreamAggregation_ClaudeFormat(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	server := mockCodeBuddyServer(t)
+	defer server.Close()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+
+	info := &relaycommon.RelayInfo{
+		RelayFormat:           types.RelayFormatClaude,
+		RelayMode:             relayconstant.RelayModeChatCompletions,
+		IsStream:              true,
+		OriginalClientStream:  false,
+		ClaudeConvertInfo:     &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone},
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:          constant.ChannelTypeCodeBuddy,
+			ChannelBaseUrl:       server.URL,
+			ApiKey:               "test-key",
+			ForceUpstreamStream:  true,
+			SupportStreamOptions: true,
+		},
+	}
+
+	req, _ := http.NewRequest("POST", server.URL+"/v2/chat/completions", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	httpClient := &http.Client{}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed to make request to mock server: %v", err)
+	}
+	defer resp.Body.Close()
+
+	usage, apiErr := OaiStreamAggregationHandler(c, info, resp)
+	if apiErr != nil {
+		t.Fatalf("OaiStreamAggregationHandler returned error: %v", apiErr)
+	}
+	if usage == nil {
+		t.Fatal("usage is nil")
+	}
+
+	// Verify response is Claude format
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"message"`) {
+		t.Errorf("response should be Claude format (type:message), got: %s", body)
+	}
+	if !strings.Contains(body, `"role":"assistant"`) {
+		t.Errorf("response should contain role:assistant, got: %s", body)
+	}
+	if !strings.Contains(body, "Hello world") {
+		t.Errorf("response body missing aggregated content 'Hello world': %s", body)
+	}
+}
