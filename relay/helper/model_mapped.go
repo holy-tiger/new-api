@@ -6,12 +6,23 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 )
+
+// codebuddyDefaultModelAliases maps common OpenAI-style model names
+// to their CodeBuddy equivalents. Used as fallback when no admin
+// model_mapping is configured for the model.
+var codebuddyDefaultModelAliases = map[string]string{
+	"gpt-4o":        "glm-5.0-turbo",
+	"gpt-4":         "glm-5.1",
+	"gpt-3.5-turbo": "glm-5.0-turbo",
+	"deepseek-chat": "deepseek-v3.1",
+}
 
 func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Request) error {
 	if info.ChannelMeta == nil {
@@ -63,6 +74,14 @@ func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Reque
 		}
 		if info.IsModelMapped {
 			info.UpstreamModelName = currentModel
+		}
+	}
+
+	// Apply CodeBuddy default model aliases as fallback (only if admin mapping didn't match)
+	if info.ChannelType == constant.ChannelTypeCodeBuddy && !info.IsModelMapped {
+		if alias, ok := codebuddyDefaultModelAliases[mappingModelName]; ok {
+			info.UpstreamModelName = alias
+			info.IsModelMapped = true
 		}
 	}
 

@@ -336,6 +336,8 @@ export function getChannelIcon(channelType) {
     case 3: // Azure OpenAI
     case 57: // Codex
       return <OpenAI size={iconSize} />;
+    case 58: // CodeBuddy
+      return <Zhipu size={iconSize} />;
     case 2: // Midjourney Proxy
     case 5: // Midjourney Proxy Plus
       return <Midjourney size={iconSize} />;

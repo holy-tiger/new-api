@@ -77,6 +77,7 @@ type ChannelMeta struct {
 	UpstreamModelName    string
 	IsModelMapped        bool
 	SupportStreamOptions bool // 是否支持流式选项
+	ForceUpstreamStream  bool // 强制上游使用流式请求（即使客户端请求非流式）
 }
 
 type TokenCountMeta struct {
@@ -97,6 +98,7 @@ type RelayInfo struct {
 	isFirstResponse   bool
 	//SendLastReasoningResponse bool
 	IsStream               bool
+	OriginalClientStream   bool // 客户端原始 stream 设置（在强制上游流式覆盖之前）
 	IsGeminiBatchEmbedding bool
 	IsPlayground           bool
 	UsePrice               bool
@@ -224,6 +226,10 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		channelMeta.SupportStreamOptions = true
 	}
 
+	if channelType == constant.ChannelTypeCodeBuddy {
+		channelMeta.ForceUpstreamStream = true
+	}
+
 	info.ChannelMeta = channelMeta
 
 	// reset some fields based on channel meta
@@ -328,6 +334,7 @@ var streamSupportedChannels = map[int]bool{
 	constant.ChannelTypeMoonshot:    true,
 	constant.ChannelTypeMiniMax:     true,
 	constant.ChannelTypeSiliconFlow: true,
+	constant.ChannelTypeCodeBuddy:   true,
 }
 
 func GenRelayInfoWs(c *gin.Context, ws *websocket.Conn) *RelayInfo {
@@ -473,7 +480,8 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		RelayMode:       relayconstant.Path2RelayMode(c.Request.URL.Path),
 		RequestURLPath:  c.Request.URL.String(),
 		RequestHeaders:  cloneRequestHeaders(c),
-		IsStream:        isStream,
+		IsStream:               isStream,
+		OriginalClientStream:   isStream,
 
 		StartTime:         startTime,
 		FirstResponseTime: startTime.Add(-time.Second),
