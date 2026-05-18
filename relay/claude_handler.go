@@ -121,6 +121,10 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if request.System == nil {
 			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: request.System为nil, 设置channel系统提示词(影响缓存前缀)")
 			request.SetStringSystem(info.ChannelSetting.SystemPrompt)
+		} else if info.ChannelSetting.SystemPromptReplace {
+			common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 已有system且Replace=true, 替换system内容(影响缓存前缀)")
+			request.SetStringSystem(info.ChannelSetting.SystemPrompt)
 		} else if info.ChannelSetting.SystemPromptOverride {
 			common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
 			logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 已有system且Override=true, 修改system内容(影响缓存前缀)")

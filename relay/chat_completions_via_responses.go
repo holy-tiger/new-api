@@ -45,6 +45,17 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 		return
 	}
 
+	if info.ChannelSetting.SystemPromptReplace {
+		common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+		for i, message := range request.Messages {
+			if message.Role != systemRole {
+				continue
+			}
+			request.Messages[i].SetStringContent(info.ChannelSetting.SystemPrompt)
+			return
+		}
+	}
+
 	if !info.ChannelSetting.SystemPromptOverride {
 		return
 	}

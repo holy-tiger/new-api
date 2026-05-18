@@ -166,6 +166,16 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 						Content: info.ChannelSetting.SystemPrompt,
 					}
 					request.Messages = append([]dto.Message{systemMessage}, request.Messages...)
+				} else if info.ChannelSetting.SystemPromptReplace {
+					common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+					// 如果有系统提示，且允许替换，则替换第一条system消息内容
+					logger.LogDebug(c, "[CACHE-DEBUG] 系统提示词: 已有system消息且Replace=true, 替换第一条system消息内容(影响缓存前缀)")
+					for i, message := range request.Messages {
+						if message.Role == request.GetSystemRoleName() {
+							request.Messages[i].SetStringContent(info.ChannelSetting.SystemPrompt)
+							break
+						}
+					}
 				} else if info.ChannelSetting.SystemPromptOverride {
 					common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
 					// 如果有系统提示，且允许覆盖，则拼接到前面
