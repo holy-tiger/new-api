@@ -32,19 +32,17 @@ type HistoryStore struct {
 	// Fallback index: (ownerScope, channelID, sessionScope, callID) -> CachedResponse
 	byCallID map[string]*CachedResponse
 
-	maxPerSession int
-	maxTotal      int
-	ttl           time.Duration
+	maxTotal int
+	ttl      time.Duration
 }
 
 // NewHistoryStore creates a new HistoryStore with the given capacity and TTL limits.
-func NewHistoryStore(maxPerSession, maxTotal int, ttl time.Duration) *HistoryStore {
+func NewHistoryStore(maxTotal int, ttl time.Duration) *HistoryStore {
 	return &HistoryStore{
-		byResponseID:  make(map[string]*CachedResponse),
-		byCallID:      make(map[string]*CachedResponse),
-		maxPerSession: maxPerSession,
-		maxTotal:      maxTotal,
-		ttl:           ttl,
+		byResponseID: make(map[string]*CachedResponse),
+		byCallID:     make(map[string]*CachedResponse),
+		maxTotal:     maxTotal,
+		ttl:          ttl,
 	}
 }
 
@@ -157,7 +155,7 @@ func (s *HistoryStore) Clear() {
 }
 
 // GlobalHistoryStore is the singleton history store used across the application.
-var GlobalHistoryStore = NewHistoryStore(100, 5000, 60*time.Minute)
+var GlobalHistoryStore = NewHistoryStore(5000, 60*time.Minute)
 
 // DetermineOwnerScope returns the owner scope string for cache isolation.
 // tokenID and userID are int values.
