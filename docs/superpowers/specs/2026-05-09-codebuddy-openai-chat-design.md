@@ -1,169 +1,169 @@
-# CodeBuddy OpenAI Chat Completions Support Design
+# CodeBuddy OpenAI Chat Completions 支持设计方案
 
-## Overview
+## 概述
 
-This design adds **CodeBuddy** as a first-class upstream channel in `new-api` for **OpenAI-compatible clients** that use:
+本设计将 **CodeBuddy** 作为一级上游渠道添加到 `new-api` 中，面向使用以下接口的 **OpenAI 兼容客户端**：
 
 - `POST /v1/chat/completions`
 - `GET /v1/models`
 
-The goal is to let clients such as OpenClaw use CodeBuddy through the existing `new-api` gateway without introducing a separate relay stack or a standalone adapter service.
+目标是让 OpenClaw 等客户端能够通过现有的 `new-api` 网关使用 CodeBuddy，而无需引入独立的转发层或独立的适配器服务。
 
-The supported upstream capability in phase 1 is:
+第一阶段支持的上游能力为：
 
 - `POST {CODEBUDDY_BASE_URL}/v2/chat/completions`
 
-## Scope
+## 范围
 
-### In Scope
+### 范围内
 
-- Add a new channel type: `CodeBuddy`
-- Support OpenAI-compatible chat clients through `/v1/chat/completions`
-- Reuse the existing OpenAI relay pipeline in `new-api`
-- Force upstream requests to use streaming mode when calling CodeBuddy
-- Support both client streaming and client non-streaming requests
-- Add built-in default model aliases for common OpenAI-style model names
-- Inject CodeBuddy-required upstream headers automatically
-- Keep existing billing, retry, logging, and usage extraction behavior wherever compatible
+- 添加新的渠道类型：`CodeBuddy`
+- 通过 `/v1/chat/completions` 支持 OpenAI 兼容的聊天客户端
+- 复用 `new-api` 现有的 OpenAI 转发管道
+- 调用 CodeBuddy 时强制上游请求使用流式模式
+- 同时支持客户端流式和非流式请求
+- 为常见的 OpenAI 风格模型名称提供内置默认别名映射
+- 自动注入 CodeBuddy 所需的上游请求头
+- 尽可能保持现有的计费、重试、日志和用量提取行为兼容
 
-### Out of Scope
+### 范围外
 
 - `POST /v1/messages`
 - `POST /v1/responses`
-- Images, audio, embeddings, rerank
-- CodeBuddy OAuth flows
-- Multi-account rotation
-- CodeBuddy usage or credit dashboard pages
-- Dynamic model sync from CodeBuddy `/v3/config`
-- Declaring tool calling as fully supported
+- 图像、音频、嵌入、重排序
+- CodeBuddy OAuth 流程
+- 多账号轮换
+- CodeBuddy 用量或积分仪表板页面
+- 从 CodeBuddy `/v3/config` 动态同步模型
+- 声明工具调用为完全支持
 
-## Background
+## 背景
 
-Analysis of `/home/wenjx/openai_v2` shows that the CodeBuddy backend already accepts an OpenAI-style chat payload at:
+对 `/home/wenjx/openai_v2` 的分析表明，CodeBuddy 后端已接受以下地址的 OpenAI 风格聊天请求：
 
 - `POST {base}/v2/chat/completions`
 
-The main protocol differences versus a normal OpenAI-compatible upstream are:
+与普通 OpenAI 兼容上游相比，主要的协议差异为：
 
-- the upstream path is `/v2/chat/completions`, not `/v1/chat/completions`
-- a fixed set of CodeBuddy headers is required
-- the upstream is expected to run in streaming mode
-- common OpenAI model aliases must be mapped to CodeBuddy model IDs
+- 上游路径是 `/v2/chat/completions`，而非 `/v1/chat/completions`
+- 需要一组固定的 CodeBuddy 请求头
+- 上游预期以流式模式运行
+- 常见的 OpenAI 模型别名必须映射到 CodeBuddy 模型 ID
 
-This makes CodeBuddy a good fit for a **special OpenAI-compatible channel type**, not for a new relay architecture.
+这使得 CodeBuddy 非常适合作为一种**特殊的 OpenAI 兼容渠道类型**，而非新建一个转发架构。
 
-## Options Considered
+## 考虑的方案
 
-### Option 1: New CodeBuddy Channel Type Reusing OpenAI Relay
+### 方案一：新建 CodeBuddy 渠道类型，复用 OpenAI 转发
 
-Add a distinct `ChannelTypeCodeBuddy`, but map it to `APITypeOpenAI` and handle CodeBuddy-specific behavior inside the existing OpenAI adaptor path.
+添加独立的 `ChannelTypeCodeBuddy`，但将其映射到 `APITypeOpenAI`，在现有的 OpenAI 适配器路径中处理 CodeBuddy 特有的行为。
 
-Pros:
+优点：
 
-- explicit protocol semantics in the admin and backend
-- low implementation risk
-- avoids duplicating relay and response handling logic
-- easy to extend later if CodeBuddy-specific behavior grows
+- 在管理后台和后端中具有明确的协议语义
+- 实现风险低
+- 避免重复转发和响应处理逻辑
+- 如果后续 CodeBuddy 特有行为增加，便于扩展
 
-Cons:
+缺点：
 
-- requires a small amount of channel-type plumbing and UI support
+- 需要少量的渠道类型管道工作和 UI 支持
 
-### Option 2: Reuse Generic OpenAI Channel with Manual Overrides
+### 方案二：复用通用 OpenAI 渠道加手动覆盖
 
-Have users configure CodeBuddy through the normal OpenAI channel plus base URL, header override, model mapping, and parameter override.
+让用户通过普通的 OpenAI 渠道加上基础 URL、请求头覆盖、模型映射和参数覆盖来配置 CodeBuddy。
 
-Pros:
+优点：
 
-- minimal code change
+- 代码改动最小
 
-Cons:
+缺点：
 
-- operationally fragile
-- protocol requirements become hidden in manual configuration
-- higher support and debugging cost
+- 运维上容易出错
+- 协议要求隐藏在手动配置中
+- 支持和调试成本更高
 
-### Option 3: Build a Dedicated CodeBuddy Relay Stack
+### 方案三：构建独立的 CodeBuddy 转发栈
 
-Implement a new adaptor or relay path modeled after `openai_v2`.
+实现一个以 `openai_v2` 为模板的新适配器或转发路径。
 
-Pros:
+优点：
 
-- maximal behavior isolation
+- 最大程度的行为隔离
 
-Cons:
+缺点：
 
-- duplicates existing `new-api` functionality
-- increases maintenance burden
-- unnecessary for the current scope
+- 重复了 `new-api` 已有功能
+- 增加维护负担
+- 对于当前范围来说不必要
 
-## Decision
+## 决策
 
-Choose **Option 1**.
+选择**方案一**。
 
-CodeBuddy will be modeled as a dedicated channel type, while still reusing the existing OpenAI relay stack. This keeps protocol differences explicit without forking the architecture.
+CodeBuddy 将建模为独立的渠道类型，同时仍复用现有的 OpenAI 转发栈。这样在不分叉架构的前提下，保持协议差异的明确性。
 
-## User-Facing Behavior
+## 用户侧行为
 
-### Supported Client Surface
+### 支持的客户端接口
 
-Phase 1 supports OpenAI-compatible clients that call:
+第一阶段支持调用以下接口的 OpenAI 兼容客户端：
 
 - `POST /v1/chat/completions`
 - `GET /v1/models`
 
-OpenClaw is the primary target. Its configuration in `openai_v2` uses the OpenAI-compatible chat completions surface, which matches this design.
+OpenClaw 是主要目标。它在 `openai_v2` 中的配置使用 OpenAI 兼容的聊天补全接口，与本设计匹配。
 
-### Streaming Behavior
+### 流式行为
 
-If the client sends `stream=true`, `new-api` will proxy CodeBuddy as a streaming upstream request and return SSE to the client through the existing streaming path.
+如果客户端发送 `stream=true`，`new-api` 将把 CodeBuddy 作为流式上游请求代理，并通过现有流式路径向客户端返回 SSE。
 
-### Non-Streaming Behavior
+### 非流式行为
 
-If the client sends `stream=false` or omits `stream`, `new-api` will still call CodeBuddy upstream with `stream=true`, then aggregate the returned stream into a normal OpenAI chat completion response before returning it to the client.
+如果客户端发送 `stream=false` 或省略 `stream`，`new-api` 仍将以 `stream=true` 调用 CodeBuddy 上游，然后将返回的流聚合为一个标准的 OpenAI 聊天补全响应，再返回给客户端。
 
-This behavior is required because the analyzed CodeBuddy upstream expects streaming mode.
+此行为是必需的，因为经过分析的 CodeBuddy 上游预期使用流式模式。
 
-## Architecture
+## 架构
 
-### Channel Modeling
+### 渠道建模
 
-Add:
+添加：
 
 - `constant.ChannelTypeCodeBuddy`
 
-Map it in:
+在以下位置进行映射：
 
 - `common.ChannelType2APIType() -> APITypeOpenAI`
 
-Result:
+结果：
 
-- relay dispatch still uses the existing OpenAI adaptor
-- CodeBuddy-specific logic is expressed as targeted channel branches inside that adaptor
+- 转发调度仍使用现有的 OpenAI 适配器
+- CodeBuddy 特有逻辑以定向渠道分支的形式在该适配器内部表达
 
-### Files Expected to Change
+### 预期需修改的文件
 
 - `constant/channel.go`
 - `common/api_type.go`
 - `relay/channel/openai/adaptor.go`
-- channel-related frontend/admin files for channel type display and selection
-- tests covering adaptor URL, header setup, request conversion, and response compatibility
+- 与渠道类型展示和选择相关的渠道前端/管理后台文件
+- 覆盖适配器 URL、请求头设置、请求转换和响应兼容性的测试
 
-No new relay mode is required.
+不需要新的转发模式。
 
-## Request Routing Design
+## 请求路由设计
 
-### Request URL
+### 请求 URL
 
-For `ChannelTypeCodeBuddy`, `relay/channel/openai/adaptor.go` must override the normal upstream path construction and always send requests to:
+对于 `ChannelTypeCodeBuddy`，`relay/channel/openai/adaptor.go` 必须覆盖正常的上游路径构建，始终将请求发送到：
 
 - `{ChannelBaseURL}/v2/chat/completions`
 
-It must not forward the external client path directly as `/v1/chat/completions`.
+不得将外部客户端路径直接转发为 `/v1/chat/completions`。
 
-### Headers
+### 请求头
 
-For `ChannelTypeCodeBuddy`, upstream requests must automatically include:
+对于 `ChannelTypeCodeBuddy`，上游请求必须自动包含：
 
 - `Authorization: Bearer {api_key}`
 - `X-Api-Key: {api_key}`
@@ -175,199 +175,199 @@ For `ChannelTypeCodeBuddy`, upstream requests must automatically include:
 - `X-Conversation-ID: {uuid}`
 - `X-Conversation-Request-ID: {uuid}`
 
-The two `X-Conversation-*` values should be generated per request inside the adaptor. They should not require admin configuration.
+两个 `X-Conversation-*` 值应在适配器内部按请求生成，不应依赖管理后台配置。
 
-These headers are part of the channel’s built-in protocol behavior and should not depend on manual header override setup.
+这些请求头是渠道内置协议行为的一部分，不应依赖手动请求头覆盖设置。
 
-## Request Conversion Rules
+## 请求转换规则
 
-### Shared Request DTO
+### 共享请求 DTO
 
-Continue to use the existing OpenAI request DTOs and conversion path already used by the OpenAI relay flow. No new request DTO is needed.
+继续使用 OpenAI 转发流程中已有的 OpenAI 请求 DTO 和转换路径。不需要新的请求 DTO。
 
-This preserves existing `new-api` semantics for optional fields and explicit zero values.
+这保留了 `new-api` 对可选字段和显式零值的现有语义。
 
-### CodeBuddy Request Normalization
+### CodeBuddy 请求规范化
 
-For `ChannelTypeCodeBuddy`, `ConvertOpenAIRequest()` should apply the following changes:
+对于 `ChannelTypeCodeBuddy`，`ConvertOpenAIRequest()` 应应用以下更改：
 
-- force upstream `stream=true`
-- ensure `stream_options.include_usage=true`
-- if client provided `stream_options`, override it with `include_usage=true`
-- keep regular OpenAI chat fields such as `temperature`, `top_p`, `max_tokens`, `tools`, `tool_choice`, and `user` as pass-through fields for phase 1
+- 强制上游 `stream=true`
+- 确保 `stream_options.include_usage=true`
+- 如果客户端提供了 `stream_options`，将其覆盖为 `include_usage=true`
+- 在第一阶段将 `temperature`、`top_p`、`max_tokens`、`tools`、`tool_choice` 和 `user` 等常规 OpenAI 聊天字段保持为透传字段
 
-The external API remains OpenAI-compatible. Only the upstream request is normalized for CodeBuddy requirements.
+外部 API 保持 OpenAI 兼容。只有上游请求针对 CodeBuddy 要求进行规范化。
 
-## Model Mapping Design
+## 模型映射设计
 
-### Default Alias Mapping
+### 默认别名映射
 
-Phase 1 should provide built-in default mappings:
+第一阶段应提供以下内置默认映射：
 
 - `gpt-4o -> glm-5.0-turbo`
 - `gpt-4 -> glm-5.1`
 - `gpt-3.5-turbo -> glm-5.0-turbo`
 - `deepseek-chat -> deepseek-v3.1`
 
-### Fallback Rule
+### 回退规则
 
-If the requested model does not match a built-in alias, pass the model name through unchanged.
+如果请求的模型未匹配任何内置别名，则将模型名称原样传递。
 
-This allows administrators and clients to use native CodeBuddy model IDs directly, such as:
+这允许管理员和客户端直接使用原生 CodeBuddy 模型 ID，例如：
 
 - `glm-5.0-turbo`
 - `glm-5.1`
 - `deepseek-v3.1`
 
-### Configuration Principle
+### 配置原则
 
-The default mapping should be integrated into the existing project model-mapping path rather than hardcoded as an isolated one-off behavior with no override path.
+默认映射应集成到现有的项目模型映射路径中，而非硬编码为没有覆盖路径的孤立一次性行为。
 
-## Response Handling Design
+## 响应处理设计
 
-Phase 1 will reuse the current OpenAI chat response handlers.
+第一阶段将复用当前的 OpenAI 聊天响应处理器。
 
-This includes:
+这包括：
 
-- streaming SSE relay
-- non-stream aggregation
-- existing usage extraction
-- existing billing settlement path
-- existing retry and logging path
+- 流式 SSE 转发
+- 非流式聚合
+- 现有的用量提取
+- 现有的计费结算路径
+- 现有的重试和日志路径
 
-No dedicated CodeBuddy response handler should be introduced in phase 1 unless validation reveals a hard incompatibility.
+除非验证发现硬性不兼容，否则第一阶段不应引入专用的 CodeBuddy 响应处理器。
 
-### Usage Field Compatibility
+### 用量字段兼容性
 
-CodeBuddy may include an additional `credit` field in `usage`.
+CodeBuddy 可能在 `usage` 中包含额外的 `credit` 字段。
 
-Phase 1 requirement:
+第一阶段要求：
 
-- parsing must not fail because of extra usage fields
+- 解析不得因额外的用量字段而失败
 
-If the extra field is not yet surfaced in `new-api` accounting or response payloads, that is acceptable for phase 1 as long as the request succeeds and standard usage parsing remains intact.
+如果额外的字段尚未出现在 `new-api` 的记账或响应负载中，对于第一阶段是可以接受的，只要请求成功且标准用量解析保持完好即可。
 
-## Error Handling
+## 错误处理
 
-Phase 1 prioritizes **OpenAI-compatible client behavior** over CodeBuddy-specific error fidelity.
+第一阶段优先考虑 **OpenAI 兼容的客户端行为**，而非 CodeBuddy 特有的错误还原。
 
-Known upstream error cases from `openai_v2` analysis include:
+从 `openai_v2` 分析中已知的上游错误情况包括：
 
-- `11101`: upstream non-stream request not supported
-- `11102`: model not found
+- `11101`：上游不支持非流式请求
+- `11102`：模型未找到
 
-### Handling Policy
+### 处理策略
 
-- keep the standard OpenAI error response structure exposed by `new-api`
-- do not introduce a full separate CodeBuddy error taxonomy in phase 1
-- avoid surfacing `11101` to clients by always forcing upstream streaming
-- if practical in the adaptor or shared error path, map model-not-found to the existing OpenAI-style model error semantics
+- 保持 `new-api` 暴露的标准 OpenAI 错误响应结构
+- 第一阶段不引入完整的独立 CodeBuddy 错误分类
+- 通过始终强制上游流式传输，避免向客户端暴露 `11101`
+- 如果在适配器或共享错误路径中可行，将"模型未找到"映射到现有的 OpenAI 风格模型错误语义
 
-The main phase 1 requirement is that clients receive stable, standard OpenAI-style errors rather than raw CodeBuddy protocol leakage.
+第一阶段的主要要求是客户端收到稳定的、标准的 OpenAI 风格错误，而非原生的 CodeBuddy 协议泄露。
 
-## `/v1/models` Design
+## `/v1/models` 设计
 
-Phase 1 supports the external `/v1/models` surface, but it does **not** depend on dynamic upstream model discovery.
+第一阶段支持外部的 `/v1/models` 接口，但**不**依赖动态的上游模型发现。
 
-Reason:
+原因：
 
-- prior analysis showed `GET {base}/v3/config` may return `models: null` in some environments
+- 先前的分析显示 `GET {base}/v3/config` 在某些环境中可能返回 `models: null`
 
-### Phase 1 Policy
+### 第一阶段策略
 
-- do not integrate CodeBuddy `/v3/config` into model sync or dynamic model discovery
-- rely on static recommended models and direct native model pass-through
+- 不将 CodeBuddy `/v3/config` 集成到模型同步或动态模型发现中
+- 依赖静态推荐模型和直接的原生模型透传
 
-This avoids coupling the feature to an unreliable upstream capability.
+这避免了将该功能耦合到不可靠的上游能力。
 
-## Tool Calling Position
+## 工具调用立场
 
-Tool-related request fields may be passed through during phase 1, but tool calling must **not** be declared fully supported without dedicated validation.
+在第一阶段可以透传工具相关的请求字段，但在没有专门验证的情况下，工具调用**不得**声明为完全支持。
 
-Documentation and testing priority should remain:
+文档和测试优先级应保持：
 
-- first-class support for text chat completions
-- tool calling compatibility treated as unverified or best-effort until tested
+- 文本聊天补全的一流支持
+- 工具调用兼容性在测试之前视为未验证或尽力而为
 
-## Risks
+## 风险
 
-### Risk 1: Forced Upstream Streaming vs Local Non-Stream Aggregation
+### 风险一：强制上游流式传输 vs 本地非流式聚合
 
-The most important behavioral risk is whether the existing non-stream aggregation path works cleanly with CodeBuddy’s streaming-only upstream behavior.
+最重要的行为风险在于现有的非流式聚合路径是否能与 CodeBuddy 的仅流式上游行为干净地协作。
 
-Mitigation:
+缓解措施：
 
-- add explicit non-stream compatibility tests for CodeBuddy
+- 为 CodeBuddy 添加明确的非流式兼容性测试
 
-### Risk 2: SSE Chunk Shape Differences
+### 风险二：SSE 数据块格式差异
 
-The second major risk is whether CodeBuddy’s streamed response and final usage chunk exactly match the assumptions in the current OpenAI chat handlers.
+第二个主要风险是 CodeBuddy 的流式响应和最终用量数据块是否完全匹配当前 OpenAI 聊天处理器的假设。
 
-Mitigation:
+缓解措施：
 
-- add targeted stream parsing and usage extraction tests
+- 添加针对性的流式解析和用量提取测试
 
-### Risk 3: Extra Usage Fields
+### 风险三：额外的用量字段
 
-Additional fields such as `credit` may be dropped or ignored.
+额外的字段（如 `credit`）可能被丢弃或忽略。
 
-Mitigation:
+缓解措施：
 
-- ensure unknown fields do not break parsing
-- defer exposing `credit` as a formal phase 1 feature
+- 确保未知字段不会破坏解析
+- 将暴露 `credit` 推迟为非第一阶段正式功能
 
-## Test Plan
+## 测试计划
 
-Minimum required test coverage:
+最低要求的测试覆盖：
 
-### Adaptor URL Tests
+### 适配器 URL 测试
 
-- CodeBuddy channel routes to `/v2/chat/completions`
+- CodeBuddy 渠道路由到 `/v2/chat/completions`
 
-### Header Tests
+### 请求头测试
 
-- `Authorization` is set correctly
-- `X-Api-Key` is set correctly
-- `X-Product` and `X-IDE-*` headers are set
-- `X-Conversation-ID` and `X-Conversation-Request-ID` are generated
+- `Authorization` 设置正确
+- `X-Api-Key` 设置正确
+- `X-Product` 和 `X-IDE-*` 请求头已设置
+- `X-Conversation-ID` 和 `X-Conversation-Request-ID` 已生成
 
-### Request Conversion Tests
+### 请求转换测试
 
-- client `stream=false` still becomes upstream `stream=true`
-- `stream_options.include_usage=true` is enforced
-- default model aliases map to expected CodeBuddy model IDs
-- unknown models pass through unchanged
+- 客户端 `stream=false` 仍变为上游 `stream=true`
+- `stream_options.include_usage=true` 被强制执行
+- 默认模型别名映射到预期的 CodeBuddy 模型 ID
+- 未知模型原样透传
 
-### Response Compatibility Tests
+### 响应兼容性测试
 
-- streaming responses pass through the existing OpenAI SSE path
-- non-stream requests aggregate correctly into a standard OpenAI response
-- final usage chunk with extra fields does not break parsing
+- 流式响应通过现有的 OpenAI SSE 路径传递
+- 非流式请求正确聚合为标准 OpenAI 响应
+- 包含额外字段的最终用量数据块不会破坏解析
 
-## Rollout Criteria
+## 上线标准
 
-Phase 1 is considered successful when all of the following are true:
+第一阶段完成的条件是以下所有项均为真：
 
-- OpenClaw can use `new-api` against a CodeBuddy channel through `/v1/chat/completions`
-- plain text chat works
-- both streaming and non-streaming client modes work
-- common alias models work
-- invalid or missing models produce a stable OpenAI-style error response
+- OpenClaw 能够通过 `/v1/chat/completions` 使用 `new-api` 对接 CodeBuddy 渠道
+- 纯文本聊天正常工作
+- 流式和非流式客户端模式均正常工作
+- 常用别名模型正常工作
+- 无效或缺失的模型产生稳定的 OpenAI 风格错误响应
 
-The following are explicitly not required for phase 1 completion:
+以下各项明确不是第一阶段完成所必需的：
 
-- guaranteed tool calling support
-- dynamic `/v1/models` sync from upstream
-- Claude-compatible client support
-- Responses API compatibility
-- OAuth or account rotation
+- 工具调用支持得到保证
+- 从上游动态同步 `/v1/models`
+- Claude 兼容的客户端支持
+- Responses API 兼容性
+- OAuth 或账号轮换
 
-## Implementation Summary
+## 实现总结
 
-The implementation should treat CodeBuddy as:
+实现应将 CodeBuddy 视为：
 
-- a **new channel type**
-- a **specialized OpenAI-compatible upstream**
-- **not** a new relay subsystem
+- **一个新的渠道类型**
+- **一个特殊的 OpenAI 兼容上游**
+- **而非**一个新的转发子系统
 
-This preserves architectural simplicity while making the CodeBuddy protocol requirements explicit, testable, and maintainable inside `new-api`.
+这既保持了架构的简洁性，又使得 CodeBuddy 协议要求在 `new-api` 内部变得明确、可测试且可维护。
