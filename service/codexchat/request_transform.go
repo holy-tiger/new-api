@@ -8,6 +8,124 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 )
 
+// EnrichRequestWithHistory checks if function_call_output items are present
+// without corresponding function_call items, and recovers them from the cache.
+// This enables continuation requests (previous_response_id) to work correctly
+// when the client only sends function results without the original calls.
+func EnrichRequestWithHistory(
+	store *HistoryStore,
+	ownerScope string,
+	channelID int,
+	sessionScope string,
+	req *dto.OpenAIResponsesRequest,
+) error {
+	if store == nil || req == nil {
+		return nil
+	}
+	if req.PreviousResponseID == "" && sessionScope == "" {
+		return nil // No continuation context
+	}
+
+	// Parse the input to understand what items we already have
+	var input any
+	if err := common.Unmarshal(req.Input, &input); err != nil {
+		return fmt.Errorf("failed to parse input for enrichment: %w", err)
+	}
+
+	inputItems, ok := input.([]any)
+	if !ok {
+		// Single item or string — no enrichment needed
+		return nil
+	}
+
+	// Collect existing function_call IDs from the input
+	existingCallIDs := make(map[string]bool)
+	for _, item := range inputItems {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := itemMap["type"].(string)
+		if itemType == "function_call" || itemType == "custom_tool_call" {
+			if callID := common.Interface2String(itemMap["call_id"]); callID != "" {
+				existingCallIDs[callID] = true
+			}
+		}
+	}
+
+	// Check for function_call_output items whose matching function_call is missing
+	cacheLookups := make(map[string]*CachedFunctionCall)
+	needsEnrichment := false
+
+	for _, item := range inputItems {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := itemMap["type"].(string)
+		if itemType != "function_call_output" {
+			continue
+		}
+		callID := common.Interface2String(itemMap["call_id"])
+		if callID == "" {
+			continue
+		}
+		if existingCallIDs[callID] {
+			continue // Already have the matching function_call
+		}
+
+		// Try to recover from cache
+		var cached *CachedResponse
+		// Try exact response_id lookup first
+		if req.PreviousResponseID != "" {
+			cached = store.LookupByResponseID(ownerScope, channelID, req.PreviousResponseID)
+		}
+		// Fallback: session-scoped call_id lookup
+		if cached == nil && sessionScope != "" {
+			cached = store.LookupByCallID(ownerScope, channelID, sessionScope, callID)
+		}
+
+		if cached != nil {
+			for _, fc := range cached.FunctionCalls {
+				if fc.CallID == callID && !existingCallIDs[fc.CallID] {
+					cacheLookups[fc.CallID] = &fc
+					existingCallIDs[fc.CallID] = true // Mark as found
+					needsEnrichment = true
+					break
+				}
+			}
+		}
+	}
+
+	if !needsEnrichment {
+		return nil
+	}
+
+	// Prepend recovered function_call items to the input
+	var enrichedInput []any
+	for _, fc := range cacheLookups {
+		fcItem := map[string]any{
+			"type":      "function_call",
+			"call_id":   fc.CallID,
+			"name":      fc.Name,
+			"arguments": fc.Arguments,
+		}
+		enrichedInput = append(enrichedInput, fcItem)
+	}
+
+	// Append original items after the recovered ones
+	enrichedInput = append(enrichedInput, inputItems...)
+
+	// Marshal back into req.Input
+	enrichedJSON, err := common.Marshal(enrichedInput)
+	if err != nil {
+		return fmt.Errorf("failed to marshal enriched input: %w", err)
+	}
+	req.Input = enrichedJSON
+
+	return nil
+}
+
 // ResponsesRequestToChatCompletionsRequest converts a Codex Responses API request
 // into an OpenAI Chat Completions request so the bridge can forward it to Chat-only
 // upstream providers.
@@ -112,7 +230,9 @@ func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesR
 
 	// Map ServiceTier
 	if responsesReq.ServiceTier != "" {
-		chatReq.ServiceTier = json.RawMessage(`"` + responsesReq.ServiceTier + `"`)
+		if data, err := common.Marshal(responsesReq.ServiceTier); err == nil {
+			chatReq.ServiceTier = json.RawMessage(data)
+		}
 	}
 
 	// Map PromptCacheKey
