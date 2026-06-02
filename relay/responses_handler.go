@@ -73,6 +73,17 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
+
+	// Bridge: Responses -> Chat Completions (for Codex clients talking to Chat-only upstreams)
+	if service.ShouldResponsesUseChatCompletionsGlobal(info.ChannelId, info.ChannelType, info.UpstreamModelName) {
+		usage, err := responsesViaChatCompletions(c, info, adaptor, request)
+		if err != nil {
+			return err
+		}
+		service.PostTextConsumeQuota(c, info, usage, nil)
+		return nil
+	}
+
 	var requestBody io.Reader
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
