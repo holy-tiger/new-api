@@ -43,6 +43,9 @@ type StreamTransformState struct {
 
 	// Track whether we've sent initial events
 	responseStarted bool
+
+	// Counter for output_index values (incremented per new output item)
+	outputIndexCounter int
 }
 
 type toolCallBuilder struct {
@@ -156,14 +159,22 @@ func (st *StreamTransformState) handleTextDelta(content string) []map[string]any
 func (st *StreamTransformState) handleReasoningDelta(content string) []map[string]any {
 	if st.currentReasoningItemID == "" {
 		st.currentReasoningItemID = generateResponsesID()
-		return []map[string]any{{
-			"type": "response.output_item.added",
-			"item": map[string]any{
-				"type": "reasoning",
-				"id":   st.currentReasoningItemID,
+		st.currentReasoningBuffer.WriteString(content)
+		return []map[string]any{
+			{
+				"type": "response.output_item.added",
+				"item": map[string]any{
+					"type": "reasoning",
+					"id":   st.currentReasoningItemID,
+				},
+				"output_index": st.nextOutputIndex(),
 			},
-			"output_index": st.nextOutputIndex(),
-		}}
+			{
+				"type":    "response.reasoning_summary_text.delta",
+				"delta":   content,
+				"item_id": st.currentReasoningItemID,
+			},
+		}
 	}
 	st.currentReasoningBuffer.WriteString(content)
 	return []map[string]any{{
@@ -255,7 +266,7 @@ func (st *StreamTransformState) finalizeOutputs() []map[string]any {
 		args := builder.Arguments.String()
 		// Normalize arguments to valid JSON
 		if args != "" {
-			if !strings.HasPrefix(args, "{") {
+			if !strings.HasPrefix(args, "{") && !strings.HasPrefix(args, "[") {
 				args = `"` + args + `"`
 			}
 		} else {
@@ -365,10 +376,12 @@ func extractThinkContent(text string, inThinkTag bool) (plainText string, reason
 	return plain.String(), reason.String(), wasInTag
 }
 
-// nextOutputIndex returns 0, which is the default output index used by the
-// Responses API for single-turn interactions.
+// nextOutputIndex returns an incrementing output index for multi-item Responses.
+// Each call returns the current value and increments the counter for the next item.
 func (st *StreamTransformState) nextOutputIndex() int {
-	return 0
+	idx := st.outputIndexCounter
+	st.outputIndexCounter++
+	return idx
 }
 
 // WriteResponsesSSEEvent writes a single Responses SSE event to the client.
