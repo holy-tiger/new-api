@@ -48,15 +48,12 @@ func (p ResponsesToChatCompletionsPolicy) IsChannelEnabled(channelID int, channe
 	if p.AllChannels {
 		return true
 	}
-	for _, id := range p.ChannelIDs {
-		if id == channelID {
-			return true
-		}
+
+	if channelID > 0 && len(p.ChannelIDs) > 0 && slices.Contains(p.ChannelIDs, channelID) {
+		return true
 	}
-	for _, t := range p.ChannelTypes {
-		if t == channelType {
-			return true
-		}
+	if channelType > 0 && len(p.ChannelTypes) > 0 && slices.Contains(p.ChannelTypes, channelType) {
+		return true
 	}
 	return false
 }

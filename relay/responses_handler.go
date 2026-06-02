@@ -21,6 +21,8 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/QuantumNous/new-api/relay/channel"
 )
 
 func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
@@ -205,6 +207,17 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+// responsesViaChatCompletions is a stub for bridging /v1/responses to /v1/chat/completions.
+// Full implementation will be added in a future task.
+func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, responsesReq *dto.OpenAIResponsesRequest) (*dto.Usage, *types.NewAPIError) {
+	return nil, types.NewErrorWithStatusCode(
+		fmt.Errorf("responses via chat completions bridge not yet implemented"),
+		types.ErrorCodeInvalidRequest,
+		http.StatusInternalServerError,
+		types.ErrOptionWithSkipRetry(),
+	)
 }
 
 // applyAdapterPassthroughBodyFixes applies adapter-specific body transformations that
