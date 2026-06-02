@@ -95,6 +95,34 @@ func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesR
 		}
 	}
 
+	// Map StreamOptions
+	if responsesReq.StreamOptions != nil {
+		chatReq.StreamOptions = responsesReq.StreamOptions
+	}
+
+	// Map Metadata
+	if len(responsesReq.Metadata) > 0 {
+		chatReq.Metadata = responsesReq.Metadata
+	}
+
+	// Map User
+	if len(responsesReq.User) > 0 {
+		chatReq.User = responsesReq.User
+	}
+
+	// Map ServiceTier
+	if responsesReq.ServiceTier != "" {
+		chatReq.ServiceTier = json.RawMessage(`"` + responsesReq.ServiceTier + `"`)
+	}
+
+	// Map PromptCacheKey
+	if len(responsesReq.PromptCacheKey) > 0 {
+		var pck string
+		if err := common.Unmarshal(responsesReq.PromptCacheKey, &pck); err == nil && pck != "" {
+			chatReq.PromptCacheKey = pck
+		}
+	}
+
 	return chatReq, nil
 }
 
@@ -169,7 +197,11 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 
 	switch typeVal {
 	case "message":
-		return []dto.Message{{Role: roleVal, Content: item["content"]}}, nil
+		role, _ := item["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+		return []dto.Message{{Role: role, Content: item["content"]}}, nil
 
 	case "reasoning":
 		text := common.Interface2String(item["text"])
@@ -185,13 +217,13 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 		return buildFunctionCallMessages(item, "")
 
 	case "function_call_output":
-		return buildToolOutputMessages(item, "")
+		return buildToolOutputMessages(item)
 
 	case "custom_tool_call":
 		return buildFunctionCallMessages(item, "custom_")
 
 	case "custom_tool_call_output":
-		return buildToolOutputMessages(item, "custom_")
+		return buildToolOutputMessages(item)
 
 	case "tool_search_call":
 		// Synthesize a function_call with name="tool_search"
@@ -209,7 +241,7 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 		return buildFunctionCallMessages(synthetic, "")
 
 	case "tool_search_output":
-		return buildToolOutputMessages(item, "")
+		return buildToolOutputMessages(item)
 
 	case "image_generation_call":
 		return nil, fmt.Errorf("image_generation_call not supported in codex chat bridge")
@@ -223,6 +255,9 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 // The prefix is prepended to the function name (e.g., "custom_" for custom_tool_call).
 func buildFunctionCallMessages(item map[string]any, namePrefix string) ([]dto.Message, error) {
 	callID := common.Interface2String(item["call_id"])
+	if callID == "" {
+		return nil, fmt.Errorf("function_call is missing required field 'call_id'")
+	}
 	name := namePrefix + common.Interface2String(item["name"])
 	arguments := common.Interface2String(item["arguments"])
 	if arguments == "" {
@@ -255,7 +290,7 @@ func buildFunctionCallMessages(item map[string]any, namePrefix string) ([]dto.Me
 }
 
 // buildToolOutputMessages creates a tool message for a function_call_output-type item.
-func buildToolOutputMessages(item map[string]any, namePrefix string) ([]dto.Message, error) {
+func buildToolOutputMessages(item map[string]any) ([]dto.Message, error) {
 	callID := common.Interface2String(item["call_id"])
 	output := common.Interface2String(item["output"])
 	if output == "" {
@@ -383,6 +418,7 @@ func buildChatResponseFormat(textRaw json.RawMessage) *dto.ResponseFormat {
 		} `json:"format"`
 	}
 	if err := common.Unmarshal(textRaw, &wrapper); err != nil || wrapper.Format == nil {
+		// Non-parseable text format: silently ignored (response_format is optional)
 		return nil
 	}
 
