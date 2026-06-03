@@ -1,0 +1,1750 @@
+package codexchat
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
+)
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+func mustMarshal(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	data, err := common.Marshal(v)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	return data
+}
+
+// =============================================================================
+// 1. String input → user message
+// =============================================================================
+
+func TestStringInputToUserMessage(t *testing.T) {
+	inputStr := "Hello, how are you?"
+	inputRaw := mustMarshal(t, inputStr)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Model != "gpt-4o" {
+		t.Errorf("expected model 'gpt-4o', got %q", chatReq.Model)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("expected role 'user', got %q", chatReq.Messages[0].Role)
+	}
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	if content != inputStr {
+		t.Errorf("expected content %q, got %q", inputStr, content)
+	}
+}
+
+// =============================================================================
+// 2. Instructions → system message
+// =============================================================================
+
+func TestInstructionsToSystemMessage(t *testing.T) {
+	instructions := "You are a helpful assistant."
+	instructionsRaw := mustMarshal(t, instructions)
+
+	inputRaw := mustMarshal(t, "Hello")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:        "gpt-4o",
+		Input:        inputRaw,
+		Instructions: instructionsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) < 2 {
+		t.Fatalf("expected at least 2 messages (system + user), got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "system" {
+		t.Errorf("expected first message role 'system', got %q", chatReq.Messages[0].Role)
+	}
+	sysContent, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content for system message, got %T", chatReq.Messages[0].Content)
+	}
+	if sysContent != instructions {
+		t.Errorf("expected system content %q, got %q", instructions, sysContent)
+	}
+	if chatReq.Messages[1].Role != "user" {
+		t.Errorf("expected second message role 'user', got %q", chatReq.Messages[1].Role)
+	}
+}
+
+// =============================================================================
+// 3. Message item → correct role
+// =============================================================================
+
+func TestMessageItemCorrectRole(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "message",
+			"role":    "assistant",
+			"content": "I can help with that.",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Errorf("expected role 'assistant', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// =============================================================================
+// 4. Function call → tool_calls
+// =============================================================================
+
+func TestFunctionCallToToolCalls(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_abc123",
+			"name":      "get_weather",
+			"arguments": `{"city":"Boston"}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	msg := chatReq.Messages[0]
+	if msg.Role != "assistant" {
+		t.Errorf("expected role 'assistant', got %q", msg.Role)
+	}
+	if len(msg.ToolCalls) == 0 {
+		t.Fatal("expected non-empty ToolCalls")
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(msg.ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if len(tcs) != 1 {
+		t.Fatalf("expected 1 ToolCall, got %d", len(tcs))
+	}
+	if tcs[0].ID != "call_abc123" {
+		t.Errorf("expected call_id 'call_abc123', got %q", tcs[0].ID)
+	}
+	if tcs[0].Type != "function" {
+		t.Errorf("expected type 'function', got %v", tcs[0].Type)
+	}
+	if tcs[0].Function.Name != "get_weather" {
+		t.Errorf("expected name 'get_weather', got %q", tcs[0].Function.Name)
+	}
+	if tcs[0].Function.Arguments != `{"city":"Boston"}` {
+		t.Errorf("expected arguments '%s', got %q", `{"city":"Boston"}`, tcs[0].Function.Arguments)
+	}
+}
+
+// =============================================================================
+// 5. Function call output → tool message
+// =============================================================================
+
+func TestFunctionCallOutputToToolMessage(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "function_call_output",
+			"call_id": "call_xyz789",
+			"output":  "sunny, 72F",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	msg := chatReq.Messages[0]
+	if msg.Role != "tool" {
+		t.Errorf("expected role 'tool', got %q", msg.Role)
+	}
+	if msg.ToolCallId != "call_xyz789" {
+		t.Errorf("expected ToolCallId 'call_xyz789', got %q", msg.ToolCallId)
+	}
+	content, ok := msg.Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", msg.Content)
+	}
+	if content != "sunny, 72F" {
+		t.Errorf("expected content 'sunny, 72F', got %q", content)
+	}
+}
+
+// =============================================================================
+// 6. Custom tool call → prefixed name
+// =============================================================================
+
+func TestCustomToolCallPrefixedName(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "custom_tool_call",
+			"call_id":   "call_custom1",
+			"name":      "my_tool",
+			"arguments": `{"key":"value"}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if len(tcs) != 1 {
+		t.Fatalf("expected 1 ToolCall, got %d", len(tcs))
+	}
+	if tcs[0].Function.Name != "custom_my_tool" {
+		t.Errorf("expected name 'custom_my_tool', got %q", tcs[0].Function.Name)
+	}
+}
+
+// =============================================================================
+// 7. Tool search call → synthetic tool
+// =============================================================================
+
+func TestToolSearchCallSyntheticTool(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "tool_search_call",
+			"call_id": "search_call_1",
+			"input":   "latest news",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if len(tcs) != 1 {
+		t.Fatalf("expected 1 ToolCall, got %d", len(tcs))
+	}
+	if tcs[0].Function.Name != "tool_search" {
+		t.Errorf("expected name 'tool_search', got %q", tcs[0].Function.Name)
+	}
+}
+
+// =============================================================================
+// 8. Mixed array
+// =============================================================================
+
+func TestMixedArray(t *testing.T) {
+	inputItems := []any{
+		"User starts the conversation",
+		map[string]any{
+			"type":    "message",
+			"role":    "assistant",
+			"content": "How can I help?",
+		},
+		map[string]any{
+			"type":      "function_call",
+			"call_id":   "call_mixed",
+			"name":      "lookup",
+			"arguments": `{"q":"test"}`,
+		},
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_mixed",
+			"output":  "result found",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(chatReq.Messages))
+	}
+	// First: string → user
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("msg[0]: expected 'user', got %q", chatReq.Messages[0].Role)
+	}
+	// Second: message item with role=assistant
+	if chatReq.Messages[1].Role != "assistant" {
+		t.Errorf("msg[1]: expected 'assistant', got %q", chatReq.Messages[1].Role)
+	}
+	// Third: function_call → assistant with ToolCalls
+	if chatReq.Messages[2].Role != "assistant" {
+		t.Errorf("msg[2]: expected 'assistant', got %q", chatReq.Messages[2].Role)
+	}
+	if len(chatReq.Messages[2].ToolCalls) == 0 {
+		t.Error("msg[2]: expected non-empty ToolCalls")
+	}
+	// Fourth: function_call_output → tool
+	if chatReq.Messages[3].Role != "tool" {
+		t.Errorf("msg[3]: expected 'tool', got %q", chatReq.Messages[3].Role)
+	}
+}
+
+// =============================================================================
+// 9. Reasoning item
+// =============================================================================
+
+func TestReasoningItem(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type": "reasoning",
+			"text": "Let me think about this carefully.",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Errorf("expected role 'assistant', got %q", chatReq.Messages[0].Role)
+	}
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	expectedPrefix := "Reasoning: Let me think about this carefully."
+	if content != expectedPrefix {
+		t.Errorf("expected content %q, got %q", expectedPrefix, content)
+	}
+}
+
+// TestReasoningUsesContentField tests that reasoning falls back to "content" if "text" is empty.
+func TestReasoningUsesContentField(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "reasoning",
+			"content": "Fallback reasoning text",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	if content != "Reasoning: Fallback reasoning text" {
+		t.Errorf("expected 'Reasoning: Fallback reasoning text', got %q", content)
+	}
+}
+
+// =============================================================================
+// 10. Params mapping
+// =============================================================================
+
+func TestParamsMapping(t *testing.T) {
+	stream := true
+	temperature := 0.7
+	topP := 0.9
+	maxTokens := uint(1000)
+	topLogProbs := int(5)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:           "gpt-4o",
+		Input:           mustMarshal(t, "Hello"),
+		Stream:          &stream,
+		Temperature:     &temperature,
+		TopP:            &topP,
+		MaxOutputTokens: &maxTokens,
+		TopLogProbs:     &topLogProbs,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if chatReq.Stream == nil || *chatReq.Stream != true {
+		t.Error("expected Stream=true")
+	}
+	if chatReq.Temperature == nil || *chatReq.Temperature != 0.7 {
+		t.Error("expected Temperature=0.7")
+	}
+	if chatReq.TopP == nil || *chatReq.TopP != 0.9 {
+		t.Error("expected TopP=0.9")
+	}
+	if chatReq.MaxCompletionTokens == nil || *chatReq.MaxCompletionTokens != 1000 {
+		t.Error("expected MaxCompletionTokens=1000")
+	}
+	if chatReq.TopLogProbs == nil || *chatReq.TopLogProbs != 5 {
+		t.Error("expected TopLogProbs=5")
+	}
+}
+
+// =============================================================================
+// 11. Tools mapping
+// =============================================================================
+
+func TestToolsMapping(t *testing.T) {
+	toolsItems := []map[string]any{
+		{
+			"type":        "function",
+			"name":        "get_weather",
+			"description": "Get the weather for a city",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			"type":        "custom",
+			"name":        "my_custom_tool",
+			"description": "A custom tool",
+		},
+	}
+	toolsRaw := mustMarshal(t, toolsItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(chatReq.Tools))
+	}
+
+	// First tool: function type → name unchanged
+	if chatReq.Tools[0].Type != "function" {
+		t.Errorf("tool[0]: expected type 'function', got %q", chatReq.Tools[0].Type)
+	}
+	if chatReq.Tools[0].Function.Name != "get_weather" {
+		t.Errorf("tool[0]: expected name 'get_weather', got %q", chatReq.Tools[0].Function.Name)
+	}
+	if chatReq.Tools[0].Function.Description != "Get the weather for a city" {
+		t.Errorf("tool[0]: expected description, got %q", chatReq.Tools[0].Function.Description)
+	}
+
+	// Second tool: custom type → name prefixed with "custom_"
+	if chatReq.Tools[1].Function.Name != "custom_my_custom_tool" {
+		t.Errorf("tool[1]: expected name 'custom_my_custom_tool', got %q", chatReq.Tools[1].Function.Name)
+	}
+}
+
+// TestToolsMappingWithToolChoice tests tool_choice passthrough.
+func TestToolsMappingWithToolChoice(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function", "name": "test_tool"},
+	})
+	toolChoiceRaw := mustMarshal(t, "auto")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:      "gpt-4o",
+		Input:      mustMarshal(t, "Hello"),
+		Tools:      toolsRaw,
+		ToolChoice: toolChoiceRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.ToolChoice == nil {
+		t.Fatal("expected non-nil ToolChoice")
+	}
+	tc, ok := chatReq.ToolChoice.(string)
+	if !ok || tc != "auto" {
+		t.Errorf("expected ToolChoice='auto', got %v", chatReq.ToolChoice)
+	}
+}
+
+// =============================================================================
+// 12. Response format
+// =============================================================================
+
+func TestResponseFormat(t *testing.T) {
+	textRaw := mustMarshal(t, map[string]any{
+		"format": map[string]any{
+			"type":        "json_schema",
+			"json_schema": map[string]any{"name": "my_schema"},
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Text:  textRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.ResponseFormat == nil {
+		t.Fatal("expected non-nil ResponseFormat")
+	}
+	if chatReq.ResponseFormat.Type != "json_schema" {
+		t.Errorf("expected type 'json_schema', got %q", chatReq.ResponseFormat.Type)
+	}
+}
+
+func TestResponseFormatEmptyText(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.ResponseFormat != nil {
+		t.Error("expected nil ResponseFormat when text is empty")
+	}
+}
+
+// =============================================================================
+// 13. Image generation → error
+// =============================================================================
+
+func TestImageGenerationReturnsError(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":   "image_generation_call",
+			"prompt": "a cat",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err == nil {
+		t.Fatal("expected error for image_generation_call, got nil")
+	}
+	// Verify it contains something about image_generation_call
+	if !contains(err.Error(), "image_generation_call") {
+		t.Errorf("error should mention 'image_generation_call', got %q", err.Error())
+	}
+}
+
+// =============================================================================
+// 14. Unsupported type → error
+// =============================================================================
+
+func TestUnsupportedTypeReturnsError(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type": "unknown_weird_type",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err == nil {
+		t.Fatal("expected error for unsupported type, got nil")
+	}
+	if !contains(err.Error(), "unknown_weird_type") {
+		t.Errorf("error should mention the unsupported type, got %q", err.Error())
+	}
+}
+
+// =============================================================================
+// 15. Empty input → error
+// =============================================================================
+
+func TestEmptyInputReturnsError(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: nil,
+	}
+
+	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err == nil {
+		t.Fatal("expected error for nil input, got nil")
+	}
+	if !contains(err.Error(), "input is required") {
+		t.Errorf("expected 'input is required' in error, got %q", err.Error())
+	}
+}
+
+func TestEmptyInputArrayReturnsMessages(t *testing.T) {
+	// Empty array should be valid and return empty messages
+	inputRaw := mustMarshal(t, []any{})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error for empty array: %v", err)
+	}
+	if len(chatReq.Messages) != 0 {
+		t.Errorf("expected 0 messages for empty array, got %d", len(chatReq.Messages))
+	}
+}
+
+// =============================================================================
+// 16. Nested arrays
+// =============================================================================
+
+func TestNestedArrays(t *testing.T) {
+	inputItems := []any{
+		"String item",
+		map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": "Object item",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("msg[0]: expected 'user', got %q", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[1].Role != "user" {
+		t.Errorf("msg[1]: expected 'user', got %q", chatReq.Messages[1].Role)
+	}
+}
+
+// =============================================================================
+// extractInstructions tests
+// =============================================================================
+
+// 17. JSON string instructions
+func TestExtractInstructionsJSONString(t *testing.T) {
+	raw := mustMarshal(t, "you are helpful")
+	result := extractInstructions(raw)
+	if result != "you are helpful" {
+		t.Errorf("expected 'you are helpful', got %q", result)
+	}
+}
+
+// 18. Empty instructions
+func TestExtractInstructionsEmpty(t *testing.T) {
+	var empty json.RawMessage
+	result := extractInstructions(empty)
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestExtractInstructionsNil(t *testing.T) {
+	var nilRaw json.RawMessage = nil
+	result := extractInstructions(nilRaw)
+	if result != "" {
+		t.Errorf("expected empty string for nil, got %q", result)
+	}
+}
+
+// 19. Non-string type
+func TestExtractInstructionsNonString(t *testing.T) {
+	raw := mustMarshal(t, 42)
+	result := extractInstructions(raw)
+	if result != "" {
+		t.Errorf("expected empty string for number, got %q", result)
+	}
+}
+
+func TestExtractInstructionsObject(t *testing.T) {
+	raw := mustMarshal(t, map[string]any{"text": "hello"})
+	result := extractInstructions(raw)
+	if result != "" {
+		t.Errorf("expected empty string for object, got %q", result)
+	}
+}
+
+// =============================================================================
+// EnrichRequestWithHistory tests
+// =============================================================================
+
+// 20. Nil store/req → nil error
+func TestEnrichNilStoreOrReq(t *testing.T) {
+	// Nil store
+	err := EnrichRequestWithHistory(nil, "scope", 1, "session", &dto.OpenAIResponsesRequest{})
+	if err != nil {
+		t.Errorf("expected nil error for nil store, got %v", err)
+	}
+
+	// Nil req
+	store := NewHistoryStore(10, time.Minute)
+	err = EnrichRequestWithHistory(store, "scope", 1, "session", nil)
+	if err != nil {
+		t.Errorf("expected nil error for nil req, got %v", err)
+	}
+}
+
+// 21. No continuation context
+func TestEnrichNoContinuationContext(t *testing.T) {
+	store := NewHistoryStore(10, time.Minute)
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_test",
+			"output":  "result",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+		// No PreviousResponseID, and sessionScope is "" in the call
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should not change input since there's no continuation context
+}
+
+// 22. Matching calls present → no enrichment needed
+func TestEnrichMatchingCallsPresent(t *testing.T) {
+	store := NewHistoryStore(10, time.Minute)
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":      "function_call",
+			"call_id":   "call_match",
+			"name":      "test_tool",
+			"arguments": `{}`,
+		},
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_match",
+			"output":  "done",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:              "gpt-4o",
+		Input:              inputRaw,
+		PreviousResponseID: "resp_123",
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Input should not change — both call and output are present
+	var items []any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("failed to parse input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Errorf("expected 2 items, got %d", len(items))
+	}
+}
+
+// 23. Missing calls recovered
+func TestEnrichMissingCallsRecovered(t *testing.T) {
+	store := NewHistoryStore(10, 10*time.Minute)
+
+	// Pre-populate the cache with a response that had function_call "call_missing"
+	store.Store("scope", 1, "resp_456", "session_abc", []CachedFunctionCall{
+		{
+			CallID:    "call_missing",
+			Name:      "recovered_tool",
+			Arguments: `{"x":1}`,
+		},
+	})
+
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_missing",
+			"output":  "recovered result",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:              "gpt-4o",
+		Input:              inputRaw,
+		PreviousResponseID: "resp_456",
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "session_abc", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Input should now have 2 items: the recovered function_call + original output
+	var items []any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("failed to parse enriched input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items in enriched input, got %d", len(items))
+	}
+
+	// First item should be the recovered function_call
+	firstItem, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first item should be a map, got %T", items[0])
+	}
+	if firstItem["type"] != "function_call" {
+		t.Errorf("expected first item type 'function_call', got %v", firstItem["type"])
+	}
+	if firstItem["call_id"] != "call_missing" {
+		t.Errorf("expected call_id 'call_missing', got %v", firstItem["call_id"])
+	}
+	if firstItem["name"] != "recovered_tool" {
+		t.Errorf("expected name 'recovered_tool', got %v", firstItem["name"])
+	}
+
+	// Second item should be the original function_call_output
+	secondItem, ok := items[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second item should be a map, got %T", items[1])
+	}
+	if secondItem["type"] != "function_call_output" {
+		t.Errorf("expected second item type 'function_call_output', got %v", secondItem["type"])
+	}
+}
+
+// 24. Cache miss
+func TestEnrichCacheMiss(t *testing.T) {
+	store := NewHistoryStore(10, time.Minute)
+	// Don't store anything — cache will miss
+
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_nonexistent",
+			"output":  "orphan result",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:              "gpt-4o",
+		Input:              inputRaw,
+		PreviousResponseID: "resp_nonexistent",
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "session_x", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Input should be unchanged
+	var items []any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("failed to parse input: %v", err)
+	}
+	if len(items) != 1 {
+		t.Errorf("expected 1 item (unchanged), got %d", len(items))
+	}
+}
+
+// =============================================================================
+// Additional edge case tests
+// =============================================================================
+
+// TestNilRequest tests ResponsesRequestToChatCompletionsRequest with nil request.
+func TestNilRequest(t *testing.T) {
+	_, err := ResponsesRequestToChatCompletionsRequest(nil)
+	if err == nil {
+		t.Fatal("expected error for nil request")
+	}
+}
+
+// TestSingleObjectInput tests a single JSON object as input (not an array).
+func TestSingleObjectInput(t *testing.T) {
+	inputRaw := mustMarshal(t, map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": "single object",
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("expected role 'user', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestInputItemWithoutTypeButWithRole tests items without a "type" but with "role".
+func TestInputItemWithoutTypeButWithRole(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"role":    "assistant",
+			"content": "I'm helping without a type field",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Errorf("expected role 'assistant', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestInputItemWithoutTypeOrRole tests items without type or role — should be user.
+func TestInputItemWithoutTypeOrRole(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"some_key": "some_value",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("expected role 'user', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestResponsesInputToMessages tests the convenience wrapper.
+func TestResponsesInputToMessages(t *testing.T) {
+	inputRaw := mustMarshal(t, "Hello via wrapper")
+	messages, err := ResponsesInputToMessages(inputRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	if messages[0].Role != "user" {
+		t.Errorf("expected role 'user', got %q", messages[0].Role)
+	}
+}
+
+// TestFunctionCallArgumentsAsObject tests arguments that are objects (not strings).
+// Interface2String uses fmt.Sprintf("%v", ...) as fallback for non-string types like map,
+// so the resulting Arguments string is Go's %v representation, not JSON.
+func TestFunctionCallArgumentsAsObject(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "function_call",
+			"call_id": "call_obj_args",
+			"name":    "process_data",
+			"arguments": map[string]any{
+				"key": "value",
+				"num": float64(42),
+			},
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if tcs[0].Function.Arguments == "" {
+		t.Error("expected non-empty arguments string, got empty")
+	}
+	// Interface2String returns fmt.Sprintf("%v", ...) for maps, so we get Go's %v representation
+	// The result contains "key:value" and "num:42" as evidence the map was stringified
+	if !contains(tcs[0].Function.Arguments, "key") {
+		t.Errorf("expected arguments to contain 'key', got %q", tcs[0].Function.Arguments)
+	}
+}
+
+// TestToolOutputWithObjectOutput tests function_call_output where output is an object.
+// Interface2String uses fmt.Sprintf("%v", ...) as fallback for non-string types like map.
+func TestToolOutputWithObjectOutput(t *testing.T) {
+	outputObj := map[string]any{
+		"status": "ok",
+		"data":   map[string]any{"temp": 72},
+	}
+	inputItems := []map[string]any{
+		{
+			"type":    "function_call_output",
+			"call_id": "call_output_obj",
+			"output":  outputObj,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	// Interface2String returns fmt.Sprintf("%v", ...) for maps
+	if !contains(content, "status") || !contains(content, "ok") {
+		t.Errorf("expected content to contain output data, got %q", content)
+	}
+}
+
+// TestReasoningEffortMapping tests that reasoning.effort is mapped.
+func TestReasoningEffortMapping(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Reasoning: &dto.Reasoning{
+			Effort: "high",
+		},
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.ReasoningEffort != "high" {
+		t.Errorf("expected ReasoningEffort='high', got %q", chatReq.ReasoningEffort)
+	}
+}
+
+// TestParallelToolCallsMapping tests parallel_tool_calls mapping.
+func TestParallelToolCallsMapping(t *testing.T) {
+	parallelRaw := mustMarshal(t, false)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:             "gpt-4o",
+		Input:             mustMarshal(t, "Hello"),
+		ParallelToolCalls: parallelRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.ParallelTooCalls == nil || *chatReq.ParallelTooCalls != false {
+		t.Errorf("expected ParallelTooCalls=false, got %v", chatReq.ParallelTooCalls)
+	}
+}
+
+// TestStreamOptionsMapping tests StreamOptions mapping.
+func TestStreamOptionsMapping(t *testing.T) {
+	streamOpts := &dto.StreamOptions{
+		IncludeUsage: true,
+	}
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:         "gpt-4o",
+		Input:         mustMarshal(t, "Hello"),
+		StreamOptions: streamOpts,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.StreamOptions == nil {
+		t.Fatal("expected non-nil StreamOptions")
+	}
+	if !chatReq.StreamOptions.IncludeUsage {
+		t.Error("expected IncludeUsage=true")
+	}
+}
+
+// TestMetadataMapping tests metadata mapping.
+func TestMetadataMapping(t *testing.T) {
+	metaRaw := mustMarshal(t, map[string]string{"key": "value"})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:    "gpt-4o",
+		Input:    mustMarshal(t, "Hello"),
+		Metadata: metaRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Metadata) == 0 {
+		t.Error("expected non-empty Metadata")
+	}
+}
+
+// TestUserMapping tests user mapping.
+func TestUserMapping(t *testing.T) {
+	userRaw := mustMarshal(t, "test_user_123")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		User:  userRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.User) == 0 {
+		t.Error("expected non-empty User")
+	}
+}
+
+// TestServiceTierMapping tests service_tier mapping.
+func TestServiceTierMapping(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model:       "gpt-4o",
+		Input:       mustMarshal(t, "Hello"),
+		ServiceTier: "auto",
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.ServiceTier) == 0 {
+		t.Error("expected non-empty ServiceTier")
+	}
+}
+
+// TestPromptCacheKeyMapping tests prompt_cache_key mapping.
+func TestPromptCacheKeyMapping(t *testing.T) {
+	cacheKeyRaw := mustMarshal(t, "cache_key_abc")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:          "gpt-4o",
+		Input:          mustMarshal(t, "Hello"),
+		PromptCacheKey: cacheKeyRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.PromptCacheKey != "cache_key_abc" {
+		t.Errorf("expected PromptCacheKey='cache_key_abc', got %q", chatReq.PromptCacheKey)
+	}
+}
+
+// TestFunctionCallMissingCallID tests error for function_call without call_id.
+func TestFunctionCallMissingCallID(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"name":      "no_call_id_tool",
+			"arguments": `{}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err == nil {
+		t.Fatal("expected error for function_call without call_id")
+	}
+	if !contains(err.Error(), "call_id") {
+		t.Errorf("error should mention 'call_id', got %q", err.Error())
+	}
+}
+
+// TestEmptyInputArrayWithInstructions tests that instructions are still prepended even with empty input.
+func TestEmptyInputArrayWithInstructions(t *testing.T) {
+	inputRaw := mustMarshal(t, []any{})
+	instructionsRaw := mustMarshal(t, "System instruction only")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:        "gpt-4o",
+		Input:        inputRaw,
+		Instructions: instructionsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message (system only), got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "system" {
+		t.Errorf("expected role 'system', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestToolSearchCallWithArguments tests tool_search_call with "arguments" key.
+func TestToolSearchCallWithArguments(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "tool_search_call",
+			"call_id":   "search_call_2",
+			"arguments": `{"query":"test"}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if tcs[0].Function.Name != "tool_search" {
+		t.Errorf("expected name 'tool_search', got %q", tcs[0].Function.Name)
+	}
+}
+
+// TestCustomToolCallOutput tests custom_tool_call_output type.
+func TestCustomToolCallOutput(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "custom_tool_call_output",
+			"call_id": "custom_out_1",
+			"output":  "custom result",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Messages[0].Role != "tool" {
+		t.Errorf("expected role 'tool', got %q", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[0].ToolCallId != "custom_out_1" {
+		t.Errorf("expected ToolCallId 'custom_out_1', got %q", chatReq.Messages[0].ToolCallId)
+	}
+}
+
+// TestToolSearchOutput tests tool_search_output type.
+func TestToolSearchOutput(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "tool_search_output",
+			"call_id": "search_out_1",
+			"output":  "search result",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Messages[0].Role != "tool" {
+		t.Errorf("expected role 'tool', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestToolsWebSearchPrefixing tests that web_search tool type gets name prefixed.
+func TestToolsWebSearchPrefixing(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "web_search", "name": "search"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "web_search_search" {
+		t.Errorf("expected name 'web_search_search', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsFileSearchPrefixing tests file_search prefixing.
+func TestToolsFileSearchPrefixing(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "file_search", "name": "files"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "file_search_files" {
+		t.Errorf("expected name 'file_search_files', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsCodeInterpreterPrefixing tests code_interpreter prefixing.
+func TestToolsCodeInterpreterPrefixing(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "code_interpreter", "name": "python"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "code_interpreter_python" {
+		t.Errorf("expected name 'code_interpreter_python', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsLocalShellPrefixing tests local_shell prefixing.
+func TestToolsLocalShellPrefixing(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "local_shell", "name": "bash"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "local_shell_bash" {
+		t.Errorf("expected name 'local_shell_bash', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsImageGenerationPrefixing tests image_generation prefixing.
+func TestToolsImageGenerationPrefixing(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "image_generation", "name": "dalle"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "image_generation_dalle" {
+		t.Errorf("expected name 'image_generation_dalle', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsFallbackToFunctionName tests fallback to function_name when name is empty.
+func TestToolsFallbackToFunctionName(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function", "function_name": "fallback_func"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "fallback_func" {
+		t.Errorf("expected name 'fallback_func', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsFallbackToTypeName tests fallback to type name when both name and function_name are empty.
+func TestToolsFallbackToTypeName(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Name != "function" {
+		t.Errorf("expected name 'function', got %q", chatReq.Tools[0].Function.Name)
+	}
+}
+
+// TestToolsSchemaAsParameters tests schema field used as parameters.
+func TestToolsSchemaAsParameters(t *testing.T) {
+	schema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"x": map[string]any{"type": "integer"}},
+	}
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function", "name": "schema_tool", "schema": schema},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Parameters == nil {
+		t.Error("expected non-nil Parameters from schema field")
+	}
+}
+
+// TestToolsFallbackToDescription tests fallback to function_description.
+func TestToolsFallbackToDescription(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function", "name": "desc_tool", "function_description": "A described tool"},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: toolsRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Tools[0].Function.Description != "A described tool" {
+		t.Errorf("expected description 'A described tool', got %q", chatReq.Tools[0].Function.Description)
+	}
+}
+
+// TestMessageTypeDefaultsRoleToUser tests that message type with no role defaults to "user".
+func TestMessageTypeDefaultsRoleToUser(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":    "message",
+			"content": "Message without explicit role",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("expected default role 'user', got %q", chatReq.Messages[0].Role)
+	}
+}
+
+// TestEnrichWithSessionScopeFallback tests that enrichment works via sessionScope fallback.
+func TestEnrichWithSessionScopeFallback(t *testing.T) {
+	store := NewHistoryStore(10, 10*time.Minute)
+
+	// Store with session scope
+	store.Store("scope", 1, "resp_session", "my_session", []CachedFunctionCall{
+		{
+			CallID:    "call_session",
+			Name:      "session_tool",
+			Arguments: `{}`,
+		},
+	})
+
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_session",
+			"output":  "session result",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+		// No PreviousResponseID — relies on sessionScope fallback
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "my_session", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var items []any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("failed to parse enriched input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	firstItem := items[0].(map[string]any)
+	if firstItem["type"] != "function_call" {
+		t.Errorf("expected 'function_call', got %v", firstItem["type"])
+	}
+}
+
+// TestEnrichSingleInputSkips tests that a single non-array input is skipped.
+func TestEnrichSingleInputSkips(t *testing.T) {
+	store := NewHistoryStore(10, time.Minute)
+	store.Store("scope", 1, "resp_single", "sess", []CachedFunctionCall{
+		{CallID: "call_x", Name: "t", Arguments: "{}"},
+	})
+
+	inputRaw := mustMarshal(t, "just a string — not an array")
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:              "gpt-4o",
+		Input:              inputRaw,
+		PreviousResponseID: "resp_single",
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "sess", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Input should still be a string (unchanged)
+	var input any
+	if err := common.Unmarshal(req.Input, &input); err != nil {
+		t.Fatalf("failed to parse input: %v", err)
+	}
+	if s, ok := input.(string); !ok || s != "just a string — not an array" {
+		t.Errorf("expected unchanged string input, got %v", input)
+	}
+}
+
+// TestEnrichDuplicateCallIDOnlyOneRecovery tests that a call_id is only recovered once.
+func TestEnrichDuplicateCallIDOnlyOneRecovery(t *testing.T) {
+	store := NewHistoryStore(10, 10*time.Minute)
+	store.Store("scope", 1, "resp_dup", "sess_dup", []CachedFunctionCall{
+		{CallID: "call_dup", Name: "dup_tool", Arguments: "{}"},
+	})
+
+	inputRaw := mustMarshal(t, []any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_dup",
+			"output":  "first",
+		},
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_dup",
+			"output":  "second",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:              "gpt-4o",
+		Input:              inputRaw,
+		PreviousResponseID: "resp_dup",
+	}
+
+	err := EnrichRequestWithHistory(store, "scope", 1, "sess_dup", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var items []any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("failed to parse input: %v", err)
+	}
+	// 1 recovered call + 2 original outputs = 3
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items (1 recovered + 2 outputs), got %d", len(items))
+	}
+}
+
+// contains checks if s contains substr (simple helper).
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchSubstring(s, substr)
+}
+
+func searchSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
