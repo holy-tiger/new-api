@@ -1,13 +1,16 @@
 package codexchat
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 )
 
 // ChatCompletionsResponseToResponsesResponse converts a Chat Completions JSON
@@ -72,6 +75,8 @@ func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse
 					Status:    "completed",
 				})
 			}
+		} else {
+			logger.LogWarn(context.Background(), "[codexchat] failed to unmarshal ToolCalls from chat response: "+err.Error())
 		}
 	}
 
@@ -97,6 +102,11 @@ func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse
 // generateResponsesID creates a Responses-style ID ("resp_" + 24 hex chars).
 func generateResponsesID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use current time nanoseconds as entropy
+		ts := time.Now().UnixNano()
+		binary.LittleEndian.PutUint64(b[:8], uint64(ts))
+		binary.LittleEndian.PutUint64(b[8:], uint64(ts>>1))
+	}
 	return "resp_" + hex.EncodeToString(b)[:24]
 }
