@@ -465,6 +465,25 @@ func responsesContentToChatContent(content any) (any, error) {
 	return chatParts, nil
 }
 
+// stringifyJSONLikeValue converts a value to a string in a JSON-preserving way.
+// - nil       → ""
+// - string    → the string as-is
+// - any other → marshal to JSON using common.Marshal
+func stringifyJSONLikeValue(v any) (string, error) {
+	switch val := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return val, nil
+	default:
+		data, err := common.Marshal(val)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+}
+
 // buildFunctionCallMessages creates an assistant message with ToolCalls for a function_call-type item.
 // The prefix is prepended to the function name (e.g., "custom_" for custom_tool_call).
 func buildFunctionCallMessages(item map[string]any, namePrefix string) ([]dto.Message, error) {
@@ -473,15 +492,9 @@ func buildFunctionCallMessages(item map[string]any, namePrefix string) ([]dto.Me
 		return nil, fmt.Errorf("function_call is missing required field 'call_id'")
 	}
 	name := namePrefix + common.Interface2String(item["name"])
-	arguments := common.Interface2String(item["arguments"])
-	if arguments == "" {
-		// Try to marshal arguments if it's a non-string value
-		if rawArgs, ok := item["arguments"]; ok && rawArgs != nil {
-			data, err := common.Marshal(rawArgs)
-			if err == nil {
-				arguments = string(data)
-			}
-		}
+	arguments, err := stringifyJSONLikeValue(item["arguments"])
+	if err != nil {
+		return nil, fmt.Errorf("stringify function_call arguments: %w", err)
 	}
 
 	tcs := []dto.ToolCallResponse{{
@@ -506,15 +519,9 @@ func buildFunctionCallMessages(item map[string]any, namePrefix string) ([]dto.Me
 // buildToolOutputMessages creates a tool message for a function_call_output-type item.
 func buildToolOutputMessages(item map[string]any) ([]dto.Message, error) {
 	callID := common.Interface2String(item["call_id"])
-	output := common.Interface2String(item["output"])
-	if output == "" {
-		// Try to marshal output if it's a non-string value
-		if rawOutput, ok := item["output"]; ok && rawOutput != nil {
-			data, err := common.Marshal(rawOutput)
-			if err == nil {
-				output = string(data)
-			}
-		}
+	output, err := stringifyJSONLikeValue(item["output"])
+	if err != nil {
+		return nil, fmt.Errorf("stringify function_call_output: %w", err)
 	}
 
 	return []dto.Message{{

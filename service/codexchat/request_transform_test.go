@@ -2,6 +2,7 @@ package codexchat
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -2309,6 +2310,206 @@ func TestContentPartsViaRoleWithoutType(t *testing.T) {
 	}
 	if imgPart["type"] != "image_url" {
 		t.Errorf("expected part[1] type 'image_url', got %v", imgPart["type"])
+	}
+}
+
+// =============================================================================
+// JSON preservation tests (Task 3: Preserve JSON semantics for tool arguments/outputs)
+// =============================================================================
+
+// TestFunctionCallArgumentsObjectPreserveJSON verifies that when function_call
+// arguments is a JSON object (not a string), it gets marshaled to proper JSON
+// instead of Go's fmt.Sprintf("%v") representation like "map[a:1 b:2]".
+func TestFunctionCallArgumentsObjectPreserveJSON(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "lookup",
+				"arguments": map[string]any{"b": 2, "a": 1},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var toolCalls []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &toolCalls); err != nil {
+		t.Fatalf("unmarshal tool calls: %v", err)
+	}
+	args := toolCalls[0].Function.Arguments
+	if args == "" {
+		t.Fatal("expected non-empty arguments, got empty string")
+	}
+	// The result must be valid JSON, not Go's fmt representation
+	if strings.HasPrefix(args, "map[") {
+		t.Fatalf("arguments were stringified with fmt semantics instead of JSON: %q", args)
+	}
+	// Verify it's actually parseable JSON
+	var parsed map[string]any
+	if err := common.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("arguments is not valid JSON: %q, err: %v", args, err)
+	}
+	if parsed["a"] != float64(1) || parsed["b"] != float64(2) {
+		t.Errorf("expected a=1, b=2, got %v", parsed)
+	}
+}
+
+// TestFunctionCallArgumentsArrayPreserveJSON verifies that when function_call
+// arguments is a JSON array, it gets marshaled to proper JSON.
+func TestFunctionCallArgumentsArrayPreserveJSON(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":      "function_call",
+				"call_id":   "call_arr",
+				"name":      "multi",
+				"arguments": []any{"x", float64(1), true},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var toolCalls []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &toolCalls); err != nil {
+		t.Fatalf("unmarshal tool calls: %v", err)
+	}
+	args := toolCalls[0].Function.Arguments
+	// Must not be Go's slice formatting like "[x 1 true]"
+	if strings.HasPrefix(args, "[") && !strings.HasPrefix(args, `["`) {
+		t.Fatalf("arguments were stringified with fmt semantics instead of JSON: %q", args)
+	}
+	// Verify it's valid JSON
+	var parsed []any
+	if err := common.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("arguments is not valid JSON: %q, err: %v", args, err)
+	}
+	if len(parsed) != 3 || parsed[0] != "x" || parsed[1] != float64(1) || parsed[2] != true {
+		t.Errorf("expected [x, 1, true], got %v", parsed)
+	}
+}
+
+// TestFunctionCallOutputObjectPreserveJSON verifies that when function_call_output
+// output is a JSON object, it gets marshaled to proper JSON instead of Go's
+// fmt.Sprintf("%v") representation.
+func TestFunctionCallOutputObjectPreserveJSON(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":    "function_call_output",
+				"call_id": "call_out_obj",
+				"output":  map[string]any{"status": "ok", "code": float64(200)},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	// Must not be Go's map formatting like "map[code:200 status:ok]"
+	if strings.HasPrefix(content, "map[") {
+		t.Fatalf("output was stringified with fmt semantics instead of JSON: %q", content)
+	}
+	// Verify it's valid JSON
+	var parsed map[string]any
+	if err := common.Unmarshal([]byte(content), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %q, err: %v", content, err)
+	}
+	if parsed["status"] != "ok" || parsed["code"] != float64(200) {
+		t.Errorf("expected status=ok, code=200, got %v", parsed)
+	}
+}
+
+// TestFunctionCallArgumentsBoolAndNumberPreserve verifies that explicit boolean
+// false and numeric 0 values survive the conversion to proper JSON strings,
+// not being silently dropped or converted to empty strings.
+func TestFunctionCallArgumentsBoolAndNumberPreserve(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":      "function_call",
+				"call_id":   "call_bool_num",
+				"name":      "toggle",
+				"arguments": map[string]any{"enabled": false, "count": float64(0)},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var toolCalls []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &toolCalls); err != nil {
+		t.Fatalf("unmarshal tool calls: %v", err)
+	}
+	args := toolCalls[0].Function.Arguments
+
+	// Verify the result is valid JSON with explicit false and 0
+	var parsed map[string]any
+	if err := common.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("arguments is not valid JSON: %q, err: %v", args, err)
+	}
+	if enabled, ok := parsed["enabled"].(bool); !ok || enabled != false {
+		t.Errorf("expected enabled=false, got %v", parsed["enabled"])
+	}
+	if count, ok := parsed["count"].(float64); !ok || count != 0 {
+		t.Errorf("expected count=0, got %v", parsed["count"])
+	}
+}
+
+// TestFunctionCallOutputBoolAndNumberPreserve verifies that explicit boolean
+// false and numeric 0 values in function_call_output survive the conversion.
+func TestFunctionCallOutputBoolAndNumberPreserve(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":    "function_call_output",
+				"call_id": "call_out_bool_num",
+				"output":  map[string]any{"success": false, "result_count": float64(0)},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+
+	var parsed map[string]any
+	if err := common.Unmarshal([]byte(content), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %q, err: %v", content, err)
+	}
+	if success, ok := parsed["success"].(bool); !ok || success != false {
+		t.Errorf("expected success=false, got %v", parsed["success"])
+	}
+	if count, ok := parsed["result_count"].(float64); !ok || count != 0 {
+		t.Errorf("expected result_count=0, got %v", parsed["result_count"])
 	}
 }
 
