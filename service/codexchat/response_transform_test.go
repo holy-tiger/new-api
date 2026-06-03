@@ -26,7 +26,7 @@ func TestPlainTextToResponse(t *testing.T) {
 		Usage: usage,
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -101,7 +101,7 @@ func TestModelAndIDPreserved(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -148,7 +148,7 @@ func TestToolCallsToFunctionCall(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -201,7 +201,7 @@ func TestFinishReasonLength(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -240,7 +240,7 @@ func TestFinishReasonStop(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -272,7 +272,7 @@ func TestReasoningContent(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -334,7 +334,7 @@ func TestUsageFields(t *testing.T) {
 		Usage: usage,
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -365,7 +365,7 @@ func TestEmptyChoices(t *testing.T) {
 		Usage:   usage,
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -386,7 +386,7 @@ func TestEmptyChoices(t *testing.T) {
 // --- Nil chat response ---
 
 func TestNilChatResponse(t *testing.T) {
-	resp := ChatCompletionsResponseToResponsesResponse(nil)
+	resp := ChatCompletionsResponseToResponsesResponse(nil, nil)
 	if resp != nil {
 		t.Errorf("expected nil response for nil input, got %+v", resp)
 	}
@@ -439,7 +439,7 @@ func TestMultipleToolCalls(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -496,7 +496,7 @@ func TestArrayContentToResponse(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -538,7 +538,7 @@ func TestToolCallsOnlyNoContent(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -582,7 +582,7 @@ func TestNilUsage(t *testing.T) {
 		// Usage is zero-value (empty struct), which means all token fields are 0
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -610,7 +610,7 @@ func TestFinishReasonContentFilter(t *testing.T) {
 		},
 	}
 
-	resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -643,7 +643,7 @@ func TestIDUniquePerCall(t *testing.T) {
 
 	ids := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		resp := ChatCompletionsResponseToResponsesResponse(chatResp)
+		resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
 		if resp == nil {
 			t.Fatal("expected non-nil response")
 		}
@@ -652,4 +652,114 @@ func TestIDUniquePerCall(t *testing.T) {
 		}
 		ids[resp.ID] = true
 	}
+}
+
+// --- Tool type restoration from ChatToolContext ---
+
+func TestChatResponseRestoresCustomToolType(t *testing.T) {
+	tcs := []dto.ToolCallResponse{
+		{
+			ID:   "call-1",
+			Type: "function",
+			Function: dto.FunctionResponse{
+				Name:      "custom_my_tool",
+				Arguments: `{}`,
+			},
+		},
+	}
+	tcJSON, err := common.Marshal(tcs)
+	if err != nil {
+		t.Fatalf("failed to marshal tool calls: %v", err)
+	}
+
+	chatResp := &dto.OpenAITextResponse{
+		Model: "gpt-4o",
+		Choices: []dto.OpenAITextResponseChoice{
+			{
+				FinishReason: "tool_calls",
+				Message: dto.Message{
+					Role:      "assistant",
+					ToolCalls: tcJSON,
+				},
+			},
+		},
+	}
+
+	// Build tool context with custom tool mapping
+	toolCtx := &ChatToolContext{
+		chatNameToResponseType: map[string]string{
+			"custom_my_tool": "custom_tool_call",
+		},
+	}
+
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, toolCtx)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+
+	var fcItems []dto.ResponsesOutput
+	for _, out := range resp.Output {
+		if out.Type == "custom_tool_call" {
+			fcItems = append(fcItems, out)
+		}
+	}
+	if len(fcItems) != 1 {
+		t.Fatalf("expected 1 custom_tool_call output, got %d (output types: %v)", len(fcItems), outputTypes(resp.Output))
+	}
+	if fcItems[0].Name != "custom_my_tool" {
+		t.Errorf("expected name 'custom_my_tool', got %q", fcItems[0].Name)
+	}
+}
+
+func TestChatResponseWithoutToolCtxDefaultsToFunctionCall(t *testing.T) {
+	tcs := []dto.ToolCallResponse{
+		{
+			ID:   "call-1",
+			Type: "function",
+			Function: dto.FunctionResponse{
+				Name:      "get_weather",
+				Arguments: `{}`,
+			},
+		},
+	}
+	tcJSON, err := common.Marshal(tcs)
+	if err != nil {
+		t.Fatalf("failed to marshal tool calls: %v", err)
+	}
+
+	chatResp := &dto.OpenAITextResponse{
+		Model: "gpt-4o",
+		Choices: []dto.OpenAITextResponseChoice{
+			{
+				FinishReason: "tool_calls",
+				Message: dto.Message{
+					Role:      "assistant",
+					ToolCalls: tcJSON,
+				},
+			},
+		},
+	}
+
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, nil)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+
+	var fcItems []dto.ResponsesOutput
+	for _, out := range resp.Output {
+		if out.Type == "function_call" {
+			fcItems = append(fcItems, out)
+		}
+	}
+	if len(fcItems) != 1 {
+		t.Fatalf("expected 1 function_call output, got %d", len(fcItems))
+	}
+}
+
+func outputTypes(outputs []dto.ResponsesOutput) []string {
+	var types []string
+	for _, o := range outputs {
+		types = append(types, o.Type)
+	}
+	return types
 }

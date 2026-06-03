@@ -1125,3 +1125,113 @@ func TestToolCallNoArgumentsOnFirstChunk(t *testing.T) {
 		t.Error("expected no arguments delta when arguments is empty")
 	}
 }
+
+// =============================================================================
+// Tool Type Restoration Tests
+// =============================================================================
+
+func TestStreamToolCallRestoresCustomToolItemType(t *testing.T) {
+	toolCtx := &ChatToolContext{
+		chatNameToResponseType: map[string]string{
+			"custom_my_tool": "custom_tool_call",
+		},
+	}
+
+	st := &StreamTransformState{
+		ToolCtx: toolCtx,
+	}
+
+	tcIndex := 0
+	tcID := "call_custom_1"
+	chunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "custom_my_tool",
+								Arguments: `{}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	events := st.ProcessChatSSEChunk(chunk)
+
+	// Find the output_item.added event and check the type was restored
+	var addedItem map[string]any
+	for _, e := range events {
+		if e["type"] == "response.output_item.added" {
+			if item, ok := e["item"].(map[string]any); ok {
+				addedItem = item
+				break
+			}
+		}
+	}
+	if addedItem == nil {
+		t.Fatal("expected output_item.added event")
+	}
+	if addedItem["type"] != "custom_tool_call" {
+		t.Errorf("expected item type 'custom_tool_call', got %v", addedItem["type"])
+	}
+	if addedItem["name"] != "custom_my_tool" {
+		t.Errorf("expected name 'custom_my_tool', got %v", addedItem["name"])
+	}
+}
+
+func TestStreamToolCallWithoutCtxDefaultsToFunctionCall(t *testing.T) {
+	st := &StreamTransformState{}
+
+	tcIndex := 0
+	tcID := "call_1"
+	chunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "get_weather",
+								Arguments: `{}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	events := st.ProcessChatSSEChunk(chunk)
+
+	var addedItem map[string]any
+	for _, e := range events {
+		if e["type"] == "response.output_item.added" {
+			if item, ok := e["item"].(map[string]any); ok {
+				addedItem = item
+				break
+			}
+		}
+	}
+	if addedItem == nil {
+		t.Fatal("expected output_item.added event")
+	}
+	if addedItem["type"] != "function_call" {
+		t.Errorf("expected default item type 'function_call', got %v", addedItem["type"])
+	}
+}

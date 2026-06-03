@@ -39,7 +39,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 	}
 
 	// 3. Convert Responses -> Chat Completions
-	chatReq, err := codexchat.ResponsesRequestToChatCompletionsRequest(responsesReq)
+	chatReq, toolCtx, err := codexchat.ResponsesRequestToChatCompletionsRequest(responsesReq)
 	if err != nil {
 		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
@@ -120,7 +120,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 	// 11. Route to streaming or non-streaming handler
 	if info.IsStream {
-		usage, newApiErr := codexchatResponsesStreamHandler(c, info, httpResp, sessionScope)
+		usage, newApiErr := codexchatResponsesStreamHandler(c, info, httpResp, sessionScope, toolCtx)
 		if newApiErr != nil {
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return nil, newApiErr
@@ -128,7 +128,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 		return usage, nil
 	}
 
-	usage, newApiErr := codexchatResponsesHandler(c, info, httpResp, sessionScope)
+	usage, newApiErr := codexchatResponsesHandler(c, info, httpResp, sessionScope, toolCtx)
 	if newApiErr != nil {
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return nil, newApiErr
@@ -138,7 +138,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 // codexchatResponsesHandler handles non-streaming Chat Completions response and
 // converts it back to Responses format.
-func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string) (*dto.Usage, *types.NewAPIError) {
+func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string, toolCtx *codexchat.ChatToolContext) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 1. Read full response body
@@ -159,7 +159,7 @@ func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 
 	// 4. Convert Chat Completions -> Responses
-	responsesResp := codexchat.ChatCompletionsResponseToResponsesResponse(&chatResp)
+	responsesResp := codexchat.ChatCompletionsResponseToResponsesResponse(&chatResp, toolCtx)
 
 	// 5. Cache function calls for continuation recovery
 	ownerScope := codexchat.DetermineOwnerScope(info.TokenId, info.UserId)
@@ -181,12 +181,13 @@ func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 // codexchatResponsesStreamHandler handles streaming Chat Completions SSE response
 // and converts it to Responses SSE events.
-func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string) (*dto.Usage, *types.NewAPIError) {
+func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string, toolCtx *codexchat.ChatToolContext) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 1. Create stream transform state
 	state := &codexchat.StreamTransformState{
 		ResponseID: helper.GetResponseID(c),
+		ToolCtx:    toolCtx,
 	}
 
 	// 2. Set SSE headers

@@ -154,15 +154,15 @@ func EnrichRequestWithHistory(
 // ResponsesRequestToChatCompletionsRequest converts a Codex Responses API request
 // into an OpenAI Chat Completions request so the bridge can forward it to Chat-only
 // upstream providers.
-func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesRequest) (*dto.GeneralOpenAIRequest, error) {
+func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesRequest) (*dto.GeneralOpenAIRequest, *ChatToolContext, error) {
 	if responsesReq == nil {
-		return nil, fmt.Errorf("responses request is nil")
+		return nil, nil, fmt.Errorf("responses request is nil")
 	}
 
 	// 1. Build messages from the input field
 	messages, err := buildMessagesFromInput(responsesReq)
 	if err != nil {
-		return nil, fmt.Errorf("build messages: %w", err)
+		return nil, nil, fmt.Errorf("build messages: %w", err)
 	}
 
 	// 2. Prepend instructions as a system message if present
@@ -176,9 +176,9 @@ func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesR
 	}
 
 	// 3. Build tools and tool_choice
-	tools, toolChoice, _, err := buildChatTools(responsesReq.Tools, responsesReq.ToolChoice)
+	tools, toolChoice, toolCtx, err := buildChatTools(responsesReq.Tools, responsesReq.ToolChoice)
 	if err != nil {
-		return nil, fmt.Errorf("build tools: %w", err)
+		return nil, nil, fmt.Errorf("build tools: %w", err)
 	}
 
 	// 4. Build response_format from text field
@@ -268,7 +268,7 @@ func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesR
 		}
 	}
 
-	return chatReq, nil
+	return chatReq, toolCtx, nil
 }
 
 // buildMessagesFromInput parses the Responses `input` field into Chat []Message.
@@ -572,20 +572,45 @@ func extractInstructions(instructionsRaw json.RawMessage) string {
 	return ""
 }
 
-// chatToolContext tracks the mapping from original Responses tool names to
-// the Chat-visible (possibly prefixed) tool names. This allows tool_choice
-// to be remapped and later allows response/stream transforms to restore the
-// original tool type.
-type chatToolContext struct {
+// ChatToolContext tracks the mapping from original Responses tool names to
+// the Chat-visible (possibly prefixed) tool names, and from Chat tool names
+// back to the original Responses tool type. This allows tool_choice to be
+// remapped and later allows response/stream transforms to restore the
+// original tool type (e.g., custom_tool_call, tool_search_call).
+type ChatToolContext struct {
 	responseNameToChatName map[string]string
+	chatNameToResponseType  map[string]string // chat-visible name -> original Responses type
+}
+
+// RestoreToolType returns the original Responses output item type for a Chat
+// tool call with the given function name. If the name is not tracked, it
+// returns the provided fallback (typically "function_call").
+func (ctx *ChatToolContext) RestoreToolType(chatFunctionName string, fallback string) string {
+	if ctx == nil {
+		return fallback
+	}
+	if responseType, ok := ctx.chatNameToResponseType[chatFunctionName]; ok {
+		return responseType
+	}
+	return fallback
+}
+
+// IsCustomTool checks if a Chat tool function name corresponds to a custom tool.
+func (ctx *ChatToolContext) IsCustomTool(chatFunctionName string) bool {
+	if ctx == nil {
+		return false
+	}
+	rt, ok := ctx.chatNameToResponseType[chatFunctionName]
+	return ok && rt == "custom_tool_call"
 }
 
 // buildChatTools converts Responses-format tools ([]map[string]any) and tool_choice into
 // Chat-format []ToolCallRequest, a remapped tool_choice (any), and a chatToolContext
 // that tracks the name mapping for later reverse-mapping.
-func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]dto.ToolCallRequest, any, *chatToolContext, error) {
-	ctx := &chatToolContext{
+func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]dto.ToolCallRequest, any, *ChatToolContext, error) {
+	ctx := &ChatToolContext{
 		responseNameToChatName: make(map[string]string),
+		chatNameToResponseType:  make(map[string]string),
 	}
 
 	var tools []dto.ToolCallRequest
@@ -623,6 +648,30 @@ func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]
 			// Track the mapping from original name to Chat name
 			if originalName != "" {
 				ctx.responseNameToChatName[originalName] = chatName
+			}
+
+			// Track the original Responses tool type for each Chat name,
+			// so the response transform can restore the correct output type.
+			if chatName != "" {
+				switch toolType {
+				case "custom":
+					ctx.chatNameToResponseType[chatName] = "custom_tool_call"
+				case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
+					// web_search doesn't have a distinct Responses output type,
+					// but track it for future use
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				case "file_search":
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				case "code_interpreter":
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				case "local_shell":
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				case "image_generation":
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				default:
+					// "function" or empty -> standard function_call
+					ctx.chatNameToResponseType[chatName] = "function_call"
+				}
 			}
 
 			// If name is still empty, try to derive it from other fields
@@ -673,7 +722,7 @@ func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]
 // through as-is. Object choices like {"type":"function","name":"X"} or
 // {"type":"custom","name":"Y"} are converted to {"type":"function","function":{"name":"Z"}}
 // where Z is the Chat-visible (possibly prefixed) tool name.
-func remapToolChoice(tc any, ctx *chatToolContext) any {
+func remapToolChoice(tc any, ctx *ChatToolContext) any {
 	// String choices pass through unchanged
 	if s, ok := tc.(string); ok {
 		return s

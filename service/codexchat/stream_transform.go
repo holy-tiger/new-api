@@ -19,6 +19,9 @@ type StreamTransformState struct {
 	CreatedAt    int64
 	FinishReason string
 
+	// Tool context for restoring original tool types in Responses output
+	ToolCtx *ChatToolContext
+
 	// Text output item being built
 	currentTextStarted bool
 	currentTextItemID  string
@@ -213,11 +216,12 @@ func (st *StreamTransformState) handleToolCallDelta(tc *dto.ToolCallResponse) []
 		}
 		st.toolCalls[idx] = builder
 
-		// Emit function_call output item added
+		// Emit function_call output item added, restoring original tool type from context
+		toolItemType := st.ToolCtx.RestoreToolType(tc.Function.Name, "function_call")
 		events = append(events, map[string]any{
 			"type": "response.output_item.added",
 			"item": map[string]any{
-				"type":    "function_call",
+				"type":    toolItemType,
 				"id":      builder.ItemID,
 				"call_id": callID,
 				"name":    tc.Function.Name,

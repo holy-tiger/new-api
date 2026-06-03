@@ -36,7 +36,7 @@ func TestStringInputToUserMessage(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestInstructionsToSystemMessage(t *testing.T) {
 		Instructions: instructionsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestMessageItemCorrectRole(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestFunctionCallToToolCalls(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestFunctionCallOutputToToolMessage(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestCustomToolCallPrefixedName(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestToolSearchCallSyntheticTool(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestMixedArray(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestReasoningItem(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestReasoningUsesContentField(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestParamsMapping(t *testing.T) {
 		TopLogProbs:     &topLogProbs,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -503,7 +503,7 @@ func TestToolsMapping(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestToolsMappingWithToolChoice(t *testing.T) {
 		ToolChoice: toolChoiceRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestResponseFormat(t *testing.T) {
 		Text:  textRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestResponseFormatEmptyText(t *testing.T) {
 		Input: mustMarshal(t, "Hello"),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -618,7 +618,7 @@ func TestImageGenerationReturnsError(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	_, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err == nil {
 		t.Fatal("expected error for image_generation_call, got nil")
 	}
@@ -645,7 +645,7 @@ func TestUnsupportedTypeReturnsError(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	_, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err == nil {
 		t.Fatal("expected error for unsupported type, got nil")
 	}
@@ -664,7 +664,7 @@ func TestEmptyInputReturnsError(t *testing.T) {
 		Input: nil,
 	}
 
-	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	_, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err == nil {
 		t.Fatal("expected error for nil input, got nil")
 	}
@@ -682,7 +682,7 @@ func TestEmptyInputArrayReturnsMessages(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error for empty array: %v", err)
 	}
@@ -711,7 +711,7 @@ func TestNestedArrays(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -961,7 +961,7 @@ func TestEnrichCacheMiss(t *testing.T) {
 
 // TestNilRequest tests ResponsesRequestToChatCompletionsRequest with nil request.
 func TestNilRequest(t *testing.T) {
-	_, err := ResponsesRequestToChatCompletionsRequest(nil)
+	_, _, err := ResponsesRequestToChatCompletionsRequest(nil)
 	if err == nil {
 		t.Fatal("expected error for nil request")
 	}
@@ -980,7 +980,7 @@ func TestSingleObjectInput(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1007,7 +1007,7 @@ func TestInputItemWithoutTypeButWithRole(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestInputItemWithoutTypeOrRole(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1082,7 +1082,7 @@ func TestFunctionCallArgumentsAsObject(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1122,7 +1122,7 @@ func TestToolOutputWithObjectOutput(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1146,7 +1146,7 @@ func TestReasoningEffortMapping(t *testing.T) {
 		},
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1165,7 +1165,7 @@ func TestParallelToolCallsMapping(t *testing.T) {
 		ParallelToolCalls: parallelRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1186,7 +1186,7 @@ func TestStreamOptionsMapping(t *testing.T) {
 		StreamOptions: streamOpts,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1208,7 +1208,7 @@ func TestMetadataMapping(t *testing.T) {
 		Metadata: metaRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1227,7 +1227,7 @@ func TestUserMapping(t *testing.T) {
 		User:  userRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1244,7 +1244,7 @@ func TestServiceTierMapping(t *testing.T) {
 		ServiceTier: "auto",
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1263,7 +1263,7 @@ func TestPromptCacheKeyMapping(t *testing.T) {
 		PromptCacheKey: cacheKeyRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1288,7 +1288,7 @@ func TestFunctionCallMissingCallID(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	_, err := ResponsesRequestToChatCompletionsRequest(req)
+	_, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err == nil {
 		t.Fatal("expected error for function_call without call_id")
 	}
@@ -1308,7 +1308,7 @@ func TestEmptyInputArrayWithInstructions(t *testing.T) {
 		Instructions: instructionsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1336,7 +1336,7 @@ func TestToolSearchCallWithArguments(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1366,7 +1366,7 @@ func TestCustomToolCallOutput(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1394,7 +1394,7 @@ func TestToolSearchOutput(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1415,7 +1415,7 @@ func TestToolsWebSearchPrefixing(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1436,7 +1436,7 @@ func TestToolsFileSearchPrefixing(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1457,7 +1457,7 @@ func TestToolsCodeInterpreterPrefixing(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1478,7 +1478,7 @@ func TestToolsLocalShellPrefixing(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1499,7 +1499,7 @@ func TestToolsImageGenerationPrefixing(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1520,7 +1520,7 @@ func TestToolsFallbackToFunctionName(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1541,7 +1541,7 @@ func TestToolsFallbackToTypeName(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1566,7 +1566,7 @@ func TestToolsSchemaAsParameters(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1587,7 +1587,7 @@ func TestToolsFallbackToDescription(t *testing.T) {
 		Tools: toolsRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1616,7 +1616,7 @@ func TestToolChoiceFunctionObjectMapsToNestedChatSelector(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1653,7 +1653,7 @@ func TestToolChoiceCustomToolMapsToNestedChatSelector(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1691,7 +1691,7 @@ func TestToolChoiceFileSearchMapsToNestedChatSelector(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1725,7 +1725,7 @@ func TestToolChoiceWebSearchMapsToNestedChatSelector(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1758,7 +1758,7 @@ func TestToolChoiceAutoPassthrough(t *testing.T) {
 				ToolChoice: mustMarshal(t, choice),
 			}
 
-			chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+			chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1856,7 +1856,7 @@ func TestMessageTypeDefaultsRoleToUser(t *testing.T) {
 		Input: inputRaw,
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2003,7 +2003,7 @@ func TestMessageContentPartsMapToChatContentParts(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2033,7 +2033,7 @@ func TestInputTextMapsToChatTextPart(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2074,7 +2074,7 @@ func TestInputImageMapsToChatImageUrlPart(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2120,7 +2120,7 @@ func TestMixedTextAndImageContent(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2187,7 +2187,7 @@ func TestUnsupportedContentKindReturnsError(t *testing.T) {
 				}),
 			}
 
-			_, err := ResponsesRequestToChatCompletionsRequest(req)
+			_, _, err := ResponsesRequestToChatCompletionsRequest(req)
 			if err == nil {
 				t.Fatalf("expected error for unsupported content type %q, got nil", tt.name)
 			}
@@ -2211,7 +2211,7 @@ func TestOutputTextMapsToChatTextPart(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2250,7 +2250,7 @@ func TestStringContentPassthrough(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2281,7 +2281,7 @@ func TestContentPartsViaRoleWithoutType(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2333,7 +2333,7 @@ func TestFunctionCallArgumentsObjectPreserveJSON(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2375,7 +2375,7 @@ func TestFunctionCallArgumentsArrayPreserveJSON(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2414,7 +2414,7 @@ func TestFunctionCallOutputObjectPreserveJSON(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2453,7 +2453,7 @@ func TestFunctionCallArgumentsBoolAndNumberPreserve(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2491,7 +2491,7 @@ func TestFunctionCallOutputBoolAndNumberPreserve(t *testing.T) {
 		}),
 	}
 
-	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

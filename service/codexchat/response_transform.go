@@ -14,8 +14,9 @@ import (
 )
 
 // ChatCompletionsResponseToResponsesResponse converts a Chat Completions JSON
-// response into a Codex Responses API JSON response.
-func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse) *dto.OpenAIResponsesResponse {
+// response into a Codex Responses API JSON response. If toolCtx is provided,
+// it is used to restore the original Responses tool type for non-standard tools.
+func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse, toolCtx *ChatToolContext) *dto.OpenAIResponsesResponse {
 	if chatResp == nil {
 		return nil
 	}
@@ -66,8 +67,10 @@ func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse
 		var toolCalls []dto.ToolCallResponse
 		if err := common.Unmarshal(choice.Message.ToolCalls, &toolCalls); err == nil {
 			for _, tc := range toolCalls {
+				// Restore the original Responses tool type from context
+				toolType := toolCtx.RestoreToolType(tc.Function.Name, "function_call")
 				resp.Output = append(resp.Output, dto.ResponsesOutput{
-					Type:      "function_call",
+					Type:      toolType,
 					ID:        tc.ID,
 					CallId:    tc.ID,
 					Name:      tc.Function.Name,
