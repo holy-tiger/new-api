@@ -1595,6 +1595,251 @@ func TestToolsFallbackToDescription(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Tool choice remapping tests (Task 1)
+// =============================================================================
+
+// TestToolChoiceFunctionObjectMapsToNestedChatSelector tests that a Responses
+// tool_choice of shape {"type":"function","name":"get_weather"} is converted
+// into Chat's nested form {"type":"function","function":{"name":"get_weather"}}.
+func TestToolChoiceFunctionObjectMapsToNestedChatSelector(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: mustMarshal(t, []map[string]any{
+			{"type": "function", "name": "get_weather"},
+		}),
+		ToolChoice: mustMarshal(t, map[string]any{
+			"type": "function",
+			"name": "get_weather",
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc, ok := chatReq.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object ToolChoice, got %T", chatReq.ToolChoice)
+	}
+	if tc["type"] != "function" {
+		t.Fatalf("expected type=function, got %v", tc["type"])
+	}
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested function object, got %T", tc["function"])
+	}
+	if fn["name"] != "get_weather" {
+		t.Fatalf("expected nested function name get_weather, got %v", fn["name"])
+	}
+}
+
+// TestToolChoiceCustomToolMapsToNestedChatSelector tests that a custom-type
+// tool_choice {"type":"custom","name":"my_tool"} is remapped to the chat-visible
+// prefixed name in the nested Chat selector format.
+func TestToolChoiceCustomToolMapsToNestedChatSelector(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: mustMarshal(t, []map[string]any{
+			{"type": "custom", "name": "my_tool"},
+		}),
+		ToolChoice: mustMarshal(t, map[string]any{
+			"type": "custom",
+			"name": "my_tool",
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc, ok := chatReq.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object ToolChoice, got %T", chatReq.ToolChoice)
+	}
+	if tc["type"] != "function" {
+		t.Fatalf("expected type=function in Chat tool_choice, got %v", tc["type"])
+	}
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested function object, got %T", tc["function"])
+	}
+	// The custom tool name is prefixed to "custom_my_tool" in the Chat tools list,
+	// so tool_choice must reference the same prefixed name.
+	if fn["name"] != "custom_my_tool" {
+		t.Fatalf("expected nested function name custom_my_tool, got %v", fn["name"])
+	}
+}
+
+// TestToolChoiceFileSearchMapsToNestedChatSelector tests that a file_search
+// tool_choice is remapped to the prefixed chat-visible name.
+func TestToolChoiceFileSearchMapsToNestedChatSelector(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: mustMarshal(t, []map[string]any{
+			{"type": "file_search", "name": "search"},
+		}),
+		ToolChoice: mustMarshal(t, map[string]any{
+			"type": "file_search",
+			"name": "search",
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc, ok := chatReq.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object ToolChoice, got %T", chatReq.ToolChoice)
+	}
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested function object, got %T", tc["function"])
+	}
+	// The file_search tool name is prefixed to "file_search_search" in Chat tools.
+	if fn["name"] != "file_search_search" {
+		t.Fatalf("expected nested function name file_search_search, got %v", fn["name"])
+	}
+}
+
+// TestToolChoiceWebSearchMapsToNestedChatSelector tests that a web_search
+// tool_choice is remapped to the prefixed chat-visible name.
+func TestToolChoiceWebSearchMapsToNestedChatSelector(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, "Hello"),
+		Tools: mustMarshal(t, []map[string]any{
+			{"type": "web_search", "name": "search"},
+		}),
+		ToolChoice: mustMarshal(t, map[string]any{
+			"type": "web_search",
+			"name": "search",
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc, ok := chatReq.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object ToolChoice, got %T", chatReq.ToolChoice)
+	}
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested function object, got %T", tc["function"])
+	}
+	// The web_search tool name is prefixed to "web_search_search" in Chat tools.
+	if fn["name"] != "web_search_search" {
+		t.Fatalf("expected nested function name web_search_search, got %v", fn["name"])
+	}
+}
+
+// TestToolChoiceAutoPassthrough tests that simple string tool_choice values
+// like "auto" and "none" are passed through unchanged.
+func TestToolChoiceAutoPassthrough(t *testing.T) {
+	for _, choice := range []string{"auto", "none", "required"} {
+		t.Run(choice, func(t *testing.T) {
+			req := &dto.OpenAIResponsesRequest{
+				Model: "gpt-4o",
+				Input: mustMarshal(t, "Hello"),
+				Tools: mustMarshal(t, []map[string]any{
+					{"type": "function", "name": "test_tool"},
+				}),
+				ToolChoice: mustMarshal(t, choice),
+			}
+
+			chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			tc, ok := chatReq.ToolChoice.(string)
+			if !ok || tc != choice {
+				t.Errorf("expected ToolChoice=%q, got %v", choice, chatReq.ToolChoice)
+			}
+		})
+	}
+}
+
+// TestBuildChatToolsReturnsToolContext verifies that the internal buildChatTools
+// populates the chatToolContext with correct name mappings.
+func TestBuildChatToolsReturnsToolContext(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{"type": "function", "name": "get_weather"},
+		{"type": "custom", "name": "my_tool"},
+		{"type": "file_search", "name": "files"},
+	})
+
+	tools, _, ctx, err := buildChatTools(toolsRaw, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(tools))
+	}
+	if ctx == nil {
+		t.Fatal("expected non-nil chatToolContext")
+	}
+
+	// Verify name mappings
+	if ctx.responseNameToChatName["get_weather"] != "get_weather" {
+		t.Errorf("expected get_weather -> get_weather, got %s", ctx.responseNameToChatName["get_weather"])
+	}
+	if ctx.responseNameToChatName["my_tool"] != "custom_my_tool" {
+		t.Errorf("expected my_tool -> custom_my_tool, got %s", ctx.responseNameToChatName["my_tool"])
+	}
+	if ctx.responseNameToChatName["files"] != "file_search_files" {
+		t.Errorf("expected files -> file_search_files, got %s", ctx.responseNameToChatName["files"])
+	}
+}
+
+// TestToolContextTracksAllPrefixedTypes verifies that the chatToolContext
+// maps all prefixed tool types correctly, including web_search_preview variants,
+// code_interpreter, local_shell, and image_generation.
+func TestToolContextTracksAllPrefixedTypes(t *testing.T) {
+	for _, tc := range []struct {
+		toolType    string
+		toolName    string
+		expectedMap string
+	}{
+		{"web_search", "ws", "web_search_ws"},
+		{"web_search_preview", "ws", "web_search_ws"},
+		{"web_search_preview_2025_03_11", "ws", "web_search_ws"},
+		{"file_search", "fs", "file_search_fs"},
+		{"code_interpreter", "ci", "code_interpreter_ci"},
+		{"local_shell", "ls", "local_shell_ls"},
+		{"image_generation", "ig", "image_generation_ig"},
+		{"custom", "ct", "custom_ct"},
+		{"function", "fn", "fn"},
+	} {
+		t.Run(tc.toolType, func(t *testing.T) {
+			toolsRaw := mustMarshal(t, []map[string]any{
+				{"type": tc.toolType, "name": tc.toolName},
+			})
+
+			_, _, ctx, err := buildChatTools(toolsRaw, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ctx == nil {
+				t.Fatal("expected non-nil chatToolContext")
+			}
+			if ctx.responseNameToChatName[tc.toolName] != tc.expectedMap {
+				t.Errorf("expected %s -> %s, got %s", tc.toolName, tc.expectedMap, ctx.responseNameToChatName[tc.toolName])
+			}
+		})
+	}
+}
+
+// =============================================================================
 // TestMessageTypeDefaultsRoleToUser tests that message type with no role defaults to "user".
 func TestMessageTypeDefaultsRoleToUser(t *testing.T) {
 	inputItems := []map[string]any{
@@ -1732,6 +1977,338 @@ func TestEnrichDuplicateCallIDOnlyOneRecovery(t *testing.T) {
 	// 1 recovered call + 2 original outputs = 3
 	if len(items) != 3 {
 		t.Fatalf("expected 3 items (1 recovered + 2 outputs), got %d", len(items))
+	}
+}
+
+// =============================================================================
+// Structured content parts tests (Task 2: Responses content → Chat content)
+// =============================================================================
+
+// TestMessageContentPartsMapToChatContentParts tests that structured Responses
+// message content (arrays of input_text/input_image parts) is properly converted
+// to Chat Completions content part format.
+func TestMessageContentPartsMapToChatContentParts(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Weather?"},
+					{"type": "input_image", "image_url": "data:image/png;base64,abc"},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+}
+
+// TestInputTextMapsToChatTextPart verifies that input_text content parts
+// are converted to Chat text parts with type="text".
+func TestInputTextMapsToChatTextPart(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Hello world"},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part, got %T", parts[0])
+	}
+	if part["type"] != "text" {
+		t.Errorf("expected part type 'text', got %v", part["type"])
+	}
+	if part["text"] != "Hello world" {
+		t.Errorf("expected part text 'Hello world', got %v", part["text"])
+	}
+}
+
+// TestInputImageMapsToChatImageUrlPart verifies that input_image content parts
+// are converted to Chat image_url parts with nested image_url.url structure.
+func TestInputImageMapsToChatImageUrlPart(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_image", "image_url": "https://example.com/img.png"},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part, got %T", parts[0])
+	}
+	if part["type"] != "image_url" {
+		t.Errorf("expected part type 'image_url', got %v", part["type"])
+	}
+	imgUrl, ok := part["image_url"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested image_url map, got %T", part["image_url"])
+	}
+	if imgUrl["url"] != "https://example.com/img.png" {
+		t.Errorf("expected url 'https://example.com/img.png', got %v", imgUrl["url"])
+	}
+}
+
+// TestMixedTextAndImageContent verifies that a message with both text and image
+// parts converts all parts correctly.
+func TestMixedTextAndImageContent(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "What's in this image?"},
+					{"type": "input_image", "image_url": "data:image/jpeg;base64,xyz"},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+
+	// First part: text
+	textPart, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part[0], got %T", parts[0])
+	}
+	if textPart["type"] != "text" {
+		t.Errorf("expected part[0] type 'text', got %v", textPart["type"])
+	}
+
+	// Second part: image_url
+	imgPart, ok := parts[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part[1], got %T", parts[1])
+	}
+	if imgPart["type"] != "image_url" {
+		t.Errorf("expected part[1] type 'image_url', got %v", imgPart["type"])
+	}
+}
+
+// TestUnsupportedContentKindReturnsError verifies that unsupported content types
+// like input_file and input_audio return an error instead of leaking the raw
+// Responses shape.
+func TestUnsupportedContentKindReturnsError(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []map[string]any
+	}{
+		{
+			name: "input_file",
+			content: []map[string]any{
+				{"type": "input_file", "file_data": "some data"},
+			},
+		},
+		{
+			name: "input_audio",
+			content: []map[string]any{
+				{"type": "input_audio", "audio_data": "some audio"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &dto.OpenAIResponsesRequest{
+				Model: "gpt-4o",
+				Input: mustMarshal(t, []map[string]any{
+					{
+						"type":    "message",
+						"role":    "user",
+						"content": tt.content,
+					},
+				}),
+			}
+
+			_, err := ResponsesRequestToChatCompletionsRequest(req)
+			if err == nil {
+				t.Fatalf("expected error for unsupported content type %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestOutputTextMapsToChatTextPart verifies that output_text content parts
+// (from assistant messages) are converted to Chat text parts.
+func TestOutputTextMapsToChatTextPart(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "output_text", "text": "The weather is sunny."},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part, got %T", parts[0])
+	}
+	if part["type"] != "text" {
+		t.Errorf("expected part type 'text', got %v", part["type"])
+	}
+	if part["text"] != "The weather is sunny." {
+		t.Errorf("expected part text 'The weather is sunny.', got %v", part["text"])
+	}
+}
+
+// TestStringContentPassthrough verifies that simple string content is still
+// passed through as a string (not wrapped in an array).
+func TestStringContentPassthrough(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Just a plain string",
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", chatReq.Messages[0].Content)
+	}
+	if content != "Just a plain string" {
+		t.Errorf("expected content 'Just a plain string', got %q", content)
+	}
+}
+
+// TestContentPartsViaRoleWithoutType verifies that structured content parts
+// are also converted when the input item has no "type" but has a "role"
+// (the typeVal=="" && roleVal!="" code path).
+func TestContentPartsViaRoleWithoutType(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Describe this"},
+					{"type": "input_image", "image_url": "https://example.com/photo.jpg"},
+				},
+			},
+		}),
+	}
+
+	chatReq, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content parts, got %T", chatReq.Messages[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+
+	// First part: text
+	textPart, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part[0], got %T", parts[0])
+	}
+	if textPart["type"] != "text" {
+		t.Errorf("expected part[0] type 'text', got %v", textPart["type"])
+	}
+
+	// Second part: image_url
+	imgPart, ok := parts[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map part[1], got %T", parts[1])
+	}
+	if imgPart["type"] != "image_url" {
+		t.Errorf("expected part[1] type 'image_url', got %v", imgPart["type"])
 	}
 }
 

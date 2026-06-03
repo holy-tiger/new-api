@@ -3,6 +3,7 @@ package codexchat
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -151,7 +152,7 @@ func ResponsesRequestToChatCompletionsRequest(responsesReq *dto.OpenAIResponsesR
 	}
 
 	// 3. Build tools and tool_choice
-	tools, toolChoice, err := buildChatTools(responsesReq.Tools, responsesReq.ToolChoice)
+	tools, toolChoice, _, err := buildChatTools(responsesReq.Tools, responsesReq.ToolChoice)
 	if err != nil {
 		return nil, fmt.Errorf("build tools: %w", err)
 	}
@@ -308,7 +309,11 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 	if typeVal == "" {
 		if roleVal != "" {
 			// Has role → use role and content directly
-			return []dto.Message{{Role: roleVal, Content: item["content"]}}, nil
+			chatContent, err := responsesContentToChatContent(item["content"])
+			if err != nil {
+				return nil, err
+			}
+			return []dto.Message{{Role: roleVal, Content: chatContent}}, nil
 		}
 		// No role either → marshal entire item as user content
 		data, _ := common.Marshal(item)
@@ -321,7 +326,11 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 		if role == "" {
 			role = "user"
 		}
-		return []dto.Message{{Role: role, Content: item["content"]}}, nil
+		chatContent, err := responsesContentToChatContent(item["content"])
+		if err != nil {
+			return nil, err
+		}
+		return []dto.Message{{Role: role, Content: chatContent}}, nil
 
 	case "reasoning":
 		text := common.Interface2String(item["text"])
@@ -369,6 +378,91 @@ func parseInputItem(item map[string]any) ([]dto.Message, error) {
 	default:
 		return nil, fmt.Errorf("unsupported input item type: %s", typeVal)
 	}
+}
+
+// responsesContentToChatContent converts a Responses API message content value
+// into the equivalent Chat Completions content value.
+//
+// Conversion rules:
+//   - string           → string (passthrough)
+//   - []T (array) of content parts → []any of Chat content parts:
+//     - input_text  → {"type":"text","text":"..."}
+//     - output_text → {"type":"text","text":"..."}
+//     - text        → {"type":"text","text":"..."}
+//     - input_image → {"type":"image_url","image_url":{"url":"..."}}
+//     - input_file / input_audio / unknown → error
+func responsesContentToChatContent(content any) (any, error) {
+	if content == nil {
+		return nil, nil
+	}
+
+	// Simple string → passthrough
+	if s, ok := content.(string); ok {
+		return s, nil
+	}
+
+	// Try to interpret as an array of content parts
+	var parts []any
+	switch v := content.(type) {
+	case []map[string]any:
+		for _, m := range v {
+			parts = append(parts, m)
+		}
+	case []any:
+		parts = v
+	default:
+		// Not a string or array — return as-is (e.g., a single map)
+		return content, nil
+	}
+
+	// If the array is empty, return as-is
+	if len(parts) == 0 {
+		return content, nil
+	}
+
+	// Convert each part
+	chatParts := make([]any, 0, len(parts))
+	for i, part := range parts {
+		partMap, ok := part.(map[string]any)
+		if !ok {
+			// Non-map part in the array; return the content as-is
+			// (not a structured content array, just a generic array)
+			return content, nil
+		}
+
+		partType, _ := partMap["type"].(string)
+		switch partType {
+		case "input_text", "output_text", "text":
+			text, _ := partMap["text"].(string)
+			chatParts = append(chatParts, map[string]any{
+				"type": "text",
+				"text": text,
+			})
+		case "input_image":
+			url := common.Interface2String(partMap["image_url"])
+			chatParts = append(chatParts, map[string]any{
+				"type": "image_url",
+				"image_url": map[string]any{
+					"url": url,
+				},
+			})
+		case "input_file":
+			return nil, fmt.Errorf("content part %d: input_file is not supported in Chat Completions", i)
+		case "input_audio":
+			return nil, fmt.Errorf("content part %d: input_audio is not supported in Chat Completions", i)
+		default:
+			// Unknown content part type — if it looks like a Responses content part
+			// (has a "type" that starts with "input_" or "output_"), reject it.
+			// Otherwise, return as-is to avoid breaking unknown array content.
+			if strings.HasPrefix(partType, "input_") || strings.HasPrefix(partType, "output_") {
+				return nil, fmt.Errorf("content part %d: unsupported content type %q", i, partType)
+			}
+			// Not a recognized content part pattern — return original content as-is
+			return content, nil
+		}
+	}
+
+	return chatParts, nil
 }
 
 // buildFunctionCallMessages creates an assistant message with ToolCalls for a function_call-type item.
@@ -447,47 +541,66 @@ func extractInstructions(instructionsRaw json.RawMessage) string {
 	return ""
 }
 
+// chatToolContext tracks the mapping from original Responses tool names to
+// the Chat-visible (possibly prefixed) tool names. This allows tool_choice
+// to be remapped and later allows response/stream transforms to restore the
+// original tool type.
+type chatToolContext struct {
+	responseNameToChatName map[string]string
+}
+
 // buildChatTools converts Responses-format tools ([]map[string]any) and tool_choice into
-// Chat-format []ToolCallRequest and tool_choice (any).
-func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]dto.ToolCallRequest, any, error) {
+// Chat-format []ToolCallRequest, a remapped tool_choice (any), and a chatToolContext
+// that tracks the name mapping for later reverse-mapping.
+func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]dto.ToolCallRequest, any, *chatToolContext, error) {
+	ctx := &chatToolContext{
+		responseNameToChatName: make(map[string]string),
+	}
+
 	var tools []dto.ToolCallRequest
 	if len(toolsRaw) > 0 {
 		var items []map[string]any
 		if err := common.Unmarshal(toolsRaw, &items); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal tools: %w", err)
+			return nil, nil, nil, fmt.Errorf("unmarshal tools: %w", err)
 		}
 
 		for _, item := range items {
 			toolType := common.Interface2String(item["type"])
 
 			// Extract function name and description
-			name := common.Interface2String(item["name"])
+			originalName := common.Interface2String(item["name"])
 			description := common.Interface2String(item["description"])
 
-			// Prefix name for non-standard tool types so they can be reverse-mapped later
+			// Compute the Chat-visible name (possibly prefixed)
+			chatName := originalName
 			switch toolType {
 			case "custom":
-				name = "custom_" + name
+				chatName = "custom_" + originalName
 			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
-				name = "web_search_" + name
+				chatName = "web_search_" + originalName
 			case "file_search":
-				name = "file_search_" + name
+				chatName = "file_search_" + originalName
 			case "code_interpreter":
-				name = "code_interpreter_" + name
+				chatName = "code_interpreter_" + originalName
 			case "local_shell":
-				name = "local_shell_" + name
+				chatName = "local_shell_" + originalName
 			case "image_generation":
-				name = "image_generation_" + name
+				chatName = "image_generation_" + originalName
 			// "function" and empty type pass through as-is
 			}
 
-			// If name is still empty, try to derive it from other fields
-			if name == "" {
-				name = common.Interface2String(item["function_name"])
+			// Track the mapping from original name to Chat name
+			if originalName != "" {
+				ctx.responseNameToChatName[originalName] = chatName
 			}
-			if name == "" {
+
+			// If name is still empty, try to derive it from other fields
+			if chatName == "" {
+				chatName = common.Interface2String(item["function_name"])
+			}
+			if chatName == "" {
 				// Fallback: use type as name
-				name = toolType
+				chatName = toolType
 			}
 			if description == "" {
 				description = common.Interface2String(item["function_description"])
@@ -504,7 +617,7 @@ func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]
 			tools = append(tools, dto.ToolCallRequest{
 				Type: "function",
 				Function: dto.FunctionRequest{
-					Name:        name,
+					Name:        chatName,
 					Description: description,
 					Parameters:  params,
 				},
@@ -512,15 +625,55 @@ func buildChatTools(toolsRaw json.RawMessage, toolChoiceRaw json.RawMessage) ([]
 		}
 	}
 
-	// Parse tool_choice
+	// Parse and remap tool_choice
 	var toolChoice any
 	if len(toolChoiceRaw) > 0 {
 		if err := common.Unmarshal(toolChoiceRaw, &toolChoice); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal tool_choice: %w", err)
+			return nil, nil, nil, fmt.Errorf("unmarshal tool_choice: %w", err)
 		}
+		toolChoice = remapToolChoice(toolChoice, ctx)
 	}
 
-	return tools, toolChoice, nil
+	return tools, toolChoice, ctx, nil
+}
+
+// remapToolChoice converts a Responses-format tool_choice into the Chat Completions
+// nested selector format. String choices ("auto", "none", "required") are passed
+// through as-is. Object choices like {"type":"function","name":"X"} or
+// {"type":"custom","name":"Y"} are converted to {"type":"function","function":{"name":"Z"}}
+// where Z is the Chat-visible (possibly prefixed) tool name.
+func remapToolChoice(tc any, ctx *chatToolContext) any {
+	// String choices pass through unchanged
+	if s, ok := tc.(string); ok {
+		return s
+	}
+
+	// Object choices need to be converted to the Chat nested form
+	m, ok := tc.(map[string]any)
+	if !ok {
+		return tc
+	}
+
+	// Extract the tool name from the tool_choice object
+	name, _ := m["name"].(string)
+	if name == "" {
+		// No name to remap — return as-is (shouldn't happen in practice)
+		return tc
+	}
+
+	// Look up the Chat-visible name from the context
+	chatName := name
+	if mapped, exists := ctx.responseNameToChatName[name]; exists {
+		chatName = mapped
+	}
+
+	// Convert to Chat nested selector format
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": chatName,
+		},
+	}
 }
 
 // buildChatResponseFormat extracts a Chat ResponseFormat from the Responses `text` field.
