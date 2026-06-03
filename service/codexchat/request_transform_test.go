@@ -2526,3 +2526,202 @@ func searchSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+// =============================================================================
+// Task 4 tests: in-place recovery and session-scope reuse
+// =============================================================================
+
+// TestHistoryRecoveryInsertsCallBeforeMatchingOutput tests that a recovered
+// function_call is inserted immediately before its matching function_call_output,
+// not prepended at the front of the entire array.
+func TestHistoryRecoveryInsertsCallBeforeMatchingOutput(t *testing.T) {
+	store := NewHistoryStore(16, time.Hour)
+	store.Store("user:1", 10, "resp_prev", "sess_1", []CachedFunctionCall{
+		{CallID: "call_1", Name: "read_file", Arguments: `{"path":"README.md"}`},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		PreviousResponseID: "resp_prev",
+		Input: mustMarshal(t, []map[string]any{
+			{"role": "user", "content": "continue"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		}),
+	}
+
+	if err := EnrichRequestWithHistory(store, "user:1", 10, "sess_1", req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var items []map[string]any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d: %#v", len(items), items)
+	}
+	if items[0]["role"] != "user" {
+		t.Fatalf("user message order changed unexpectedly: %#v", items)
+	}
+	if items[1]["type"] != "function_call" {
+		t.Fatalf("expected recovered call at index 1, got %#v", items[1])
+	}
+	if items[2]["type"] != "function_call_output" {
+		t.Fatalf("expected output at index 2, got %#v", items[2])
+	}
+}
+
+// TestHistoryRecoveryPreservesUserMessageOrder tests that when multiple user
+// messages and function_call_output items exist, the original ordering of
+// user messages is preserved and recovered calls are placed adjacent to
+// their matching outputs.
+func TestHistoryRecoveryPreservesUserMessageOrder(t *testing.T) {
+	store := NewHistoryStore(16, time.Hour)
+	store.Store("user:1", 10, "resp_prev", "sess_1", []CachedFunctionCall{
+		{CallID: "call_a", Name: "tool_a", Arguments: `{}`},
+		{CallID: "call_b", Name: "tool_b", Arguments: `{}`},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		PreviousResponseID: "resp_prev",
+		Input: mustMarshal(t, []map[string]any{
+			{"role": "user", "content": "first message"},
+			{"role": "user", "content": "second message"},
+			{"type": "function_call_output", "call_id": "call_a", "output": "result_a"},
+			{"role": "user", "content": "third message"},
+			{"type": "function_call_output", "call_id": "call_b", "output": "result_b"},
+		}),
+	}
+
+	if err := EnrichRequestWithHistory(store, "user:1", 10, "sess_1", req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var items []map[string]any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+
+	// Expected order:
+	// 0: user "first message"
+	// 1: user "second message"
+	// 2: function_call call_a (recovered)
+	// 3: function_call_output call_a
+	// 4: user "third message"
+	// 5: function_call call_b (recovered)
+	// 6: function_call_output call_b
+
+	expectedOrder := []struct {
+		key    string
+		val    string
+		itemType string
+	}{
+		{"role", "user", ""},
+		{"role", "user", ""},
+		{"type", "function_call", ""},
+		{"type", "function_call_output", ""},
+		{"role", "user", ""},
+		{"type", "function_call", ""},
+		{"type", "function_call_output", ""},
+	}
+
+	if len(items) != len(expectedOrder) {
+		t.Fatalf("expected %d items, got %d: %#v", len(expectedOrder), len(items), items)
+	}
+
+	for i, exp := range expectedOrder {
+		v, ok := items[i][exp.key]
+		if !ok {
+			t.Fatalf("item[%d] missing key %q, got %#v", i, exp.key, items[i])
+		}
+		s, ok := v.(string)
+		if !ok || s != exp.val {
+			t.Fatalf("item[%d][%q] = %q, want %q", i, exp.key, v, exp.val)
+		}
+	}
+}
+
+// TestResolveResponsesSessionScopeSameScopeForLookupAndStore verifies that
+// ResolveResponsesSessionScope extracts metadata.session_id from the request
+// and that the same computed scope is used for both lookup and store operations.
+func TestResolveResponsesSessionScopeSameScopeForLookupAndStore(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, map[string]string{"session_id": "meta-session-xyz"}),
+	}
+
+	scope := ResolveResponsesSessionScope(req, "", "")
+	if scope != "meta-session-xyz" {
+		t.Errorf("expected 'meta-session-xyz', got %q", scope)
+	}
+
+	// Now verify the scope works for both store and lookup
+	store := NewHistoryStore(16, time.Hour)
+	store.Store("user:1", 10, "resp_1", scope, []CachedFunctionCall{
+		{CallID: "call_1", Name: "my_tool", Arguments: `{}`},
+	})
+
+	// Lookup using the same scope should succeed
+	entry := store.LookupByCallID("user:1", 10, scope, "call_1")
+	if entry == nil {
+		t.Fatal("expected to find entry using the same computed scope, got nil")
+	}
+}
+
+// TestHistoryRecoveryMultipleRecoveriesAdjacentToOutputs tests that when
+// multiple function_call_outputs are present with missing calls, each
+// recovered call is placed directly before its matching output.
+func TestHistoryRecoveryMultipleRecoveriesAdjacentToOutputs(t *testing.T) {
+	store := NewHistoryStore(16, time.Hour)
+	store.Store("user:1", 10, "resp_prev", "sess_1", []CachedFunctionCall{
+		{CallID: "call_x", Name: "tool_x", Arguments: `{}`},
+		{CallID: "call_y", Name: "tool_y", Arguments: `{}`},
+	})
+
+	req := &dto.OpenAIResponsesRequest{
+		PreviousResponseID: "resp_prev",
+		Input: mustMarshal(t, []map[string]any{
+			{"type": "function_call_output", "call_id": "call_x", "output": "result_x"},
+			{"type": "function_call_output", "call_id": "call_y", "output": "result_y"},
+		}),
+	}
+
+	if err := EnrichRequestWithHistory(store, "user:1", 10, "sess_1", req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var items []map[string]any
+	if err := common.Unmarshal(req.Input, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+
+	// Expected: call_x, output_x, call_y, output_y
+	if len(items) != 4 {
+		t.Fatalf("expected 4 items, got %d: %#v", len(items), items)
+	}
+	if items[0]["type"] != "function_call" || items[0]["call_id"] != "call_x" {
+		t.Fatalf("expected function_call call_x at 0, got %#v", items[0])
+	}
+	if items[1]["type"] != "function_call_output" {
+		t.Fatalf("expected function_call_output at index 1, got %#v", items[1])
+	}
+	// Verify call_x is immediately before its output
+	if items[0]["type"] != "function_call" {
+		t.Fatalf("expected function_call at index 0, got %#v", items[0])
+	}
+	callXID, _ := items[0]["call_id"].(string)
+	outputXID, _ := items[1]["call_id"].(string)
+	if callXID != outputXID {
+		t.Fatalf("expected call_id at index 0 to match output at index 1, got %q vs %q", callXID, outputXID)
+	}
+	// Verify call_y is immediately before its output
+	if items[2]["type"] != "function_call" {
+		t.Fatalf("expected function_call at index 2, got %#v", items[2])
+	}
+	if items[3]["type"] != "function_call_output" {
+		t.Fatalf("expected function_call_output at index 3, got %#v", items[3])
+	}
+	callYID, _ := items[2]["call_id"].(string)
+	outputYID, _ := items[3]["call_id"].(string)
+	if callYID != outputYID {
+		t.Fatalf("expected call_id at index 2 to match output at index 3, got %q vs %q", callYID, outputYID)
+	}
+}

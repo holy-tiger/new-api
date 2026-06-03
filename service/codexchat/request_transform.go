@@ -54,9 +54,15 @@ func EnrichRequestWithHistory(
 		}
 	}
 
-	// Check for function_call_output items whose matching function_call is missing
-	cacheLookups := make(map[string]*CachedFunctionCall)
-	needsEnrichment := false
+	// Check for function_call_output items whose matching function_call is missing,
+	// and recover them from cache. We track recovered calls in order so they can be
+	// inserted in-place (immediately before their matching output) rather than
+	// prepended at the front of the entire array.
+	type recoveredCall struct {
+		callID string
+		fc     *CachedFunctionCall
+	}
+	var recoveredCalls []recoveredCall
 
 	for _, item := range inputItems {
 		itemMap, ok := item.(map[string]any)
@@ -89,33 +95,51 @@ func EnrichRequestWithHistory(
 		if cached != nil {
 			for _, fc := range cached.FunctionCalls {
 				if fc.CallID == callID && !existingCallIDs[fc.CallID] {
-					cacheLookups[fc.CallID] = &fc
+					fcCopy := fc // copy to avoid reference issues
+					recoveredCalls = append(recoveredCalls, recoveredCall{
+						callID: fc.CallID,
+						fc:     &fcCopy,
+					})
 					existingCallIDs[fc.CallID] = true // Mark as found
-					needsEnrichment = true
 					break
 				}
 			}
 		}
 	}
 
-	if !needsEnrichment {
+	if len(recoveredCalls) == 0 {
 		return nil
 	}
 
-	// Prepend recovered function_call items to the input
-	var enrichedInput []any
-	for _, fc := range cacheLookups {
-		fcItem := map[string]any{
-			"type":      "function_call",
-			"call_id":   fc.CallID,
-			"name":      fc.Name,
-			"arguments": fc.Arguments,
-		}
-		enrichedInput = append(enrichedInput, fcItem)
+	// Build a lookup from callID to recoveredCall for fast in-place insertion
+	recoveredByCallID := make(map[string]*CachedFunctionCall, len(recoveredCalls))
+	for _, rc := range recoveredCalls {
+		recoveredByCallID[rc.callID] = rc.fc
 	}
 
-	// Append original items after the recovered ones
-	enrichedInput = append(enrichedInput, inputItems...)
+	// Rebuild the input in order, inserting recovered function_call items
+	// immediately before their matching function_call_output.
+	var enrichedInput []any
+	for _, item := range inputItems {
+		itemMap, ok := item.(map[string]any)
+		if ok {
+			itemType, _ := itemMap["type"].(string)
+			if itemType == "function_call_output" {
+				callID := common.Interface2String(itemMap["call_id"])
+				if fc, found := recoveredByCallID[callID]; found {
+					// Insert the recovered function_call before this output
+					enrichedInput = append(enrichedInput, map[string]any{
+						"type":      "function_call",
+						"call_id":   fc.CallID,
+						"name":      fc.Name,
+						"arguments": fc.Arguments,
+					})
+					delete(recoveredByCallID, callID) // avoid double insertion
+				}
+			}
+		}
+		enrichedInput = append(enrichedInput, item)
+	}
 
 	// Marshal back into req.Input
 	enrichedJSON, err := common.Marshal(enrichedInput)

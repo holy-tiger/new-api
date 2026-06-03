@@ -5,6 +5,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 )
 
 // CachedFunctionCall stores one function call from a previous response.
@@ -179,4 +182,40 @@ func DetermineSessionScope(promptCacheKey string, headerSessionID string, metada
 		return metadataSessionID
 	}
 	return ""
+}
+
+// ResolveResponsesSessionScope extracts the session scope from an
+// OpenAIResponsesRequest and the HTTP header values. It decodes metadata
+// to extract metadata.session_id, then delegates to DetermineSessionScope
+// using the priority: prompt_cache_key > x-session-id / session_id headers >
+// metadata.session_id.
+func ResolveResponsesSessionScope(
+	req *dto.OpenAIResponsesRequest,
+	headerSessionID string,
+	xSessionID string,
+) string {
+	// 1. Extract prompt_cache_key from request
+	var promptCacheKey string
+	if req.PromptCacheKey != nil {
+		_ = common.Unmarshal(req.PromptCacheKey, &promptCacheKey)
+	}
+
+	// 2. Resolve header-level session ID: session_id header takes priority over x-session-id
+	resolvedHeaderSessionID := headerSessionID
+	if resolvedHeaderSessionID == "" {
+		resolvedHeaderSessionID = xSessionID
+	}
+
+	// 3. Extract metadata.session_id from request
+	var metadataSessionID string
+	if len(req.Metadata) > 0 {
+		var meta map[string]any
+		if err := common.Unmarshal(req.Metadata, &meta); err == nil {
+			if v, ok := meta["session_id"]; ok {
+				metadataSessionID = common.Interface2String(v)
+			}
+		}
+	}
+
+	return DetermineSessionScope(promptCacheKey, resolvedHeaderSessionID, metadataSessionID)
 }

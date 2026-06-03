@@ -3,6 +3,8 @@ package codexchat
 import (
 	"testing"
 	"time"
+
+	"github.com/QuantumNous/new-api/dto"
 )
 
 // --- Store and Lookup ---
@@ -284,5 +286,91 @@ func TestDetermineSessionScopeAllEmpty(t *testing.T) {
 	result := DetermineSessionScope("", "", "")
 	if result != "" {
 		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+// --- ResolveResponsesSessionScope ---
+
+func TestResolveResponsesSessionScopeWithPromptCacheKey(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		PromptCacheKey: mustMarshal(t, "pc-key-1"),
+	}
+	result := ResolveResponsesSessionScope(req, "header-sess", "x-sess")
+	if result != "pc-key-1" {
+		t.Errorf("expected 'pc-key-1', got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeFallbackToHeader(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{}
+	result := ResolveResponsesSessionScope(req, "header-sess", "x-sess")
+	if result != "header-sess" {
+		t.Errorf("expected 'header-sess', got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeFallbackToXSessionID(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{}
+	result := ResolveResponsesSessionScope(req, "", "x-sess")
+	if result != "x-sess" {
+		t.Errorf("expected 'x-sess', got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeFromMetadata(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, map[string]string{"session_id": "meta-sess-1"}),
+	}
+	result := ResolveResponsesSessionScope(req, "", "")
+	if result != "meta-sess-1" {
+		t.Errorf("expected 'meta-sess-1', got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeMetadataLowerPriorityThanHeader(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, map[string]string{"session_id": "meta-sess"}),
+	}
+	result := ResolveResponsesSessionScope(req, "header-sess", "x-sess")
+	if result != "header-sess" {
+		t.Errorf("expected 'header-sess' (header > metadata), got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeMetadataLowerPriorityThanXSession(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, map[string]string{"session_id": "meta-sess"}),
+	}
+	result := ResolveResponsesSessionScope(req, "", "x-sess")
+	if result != "x-sess" {
+		t.Errorf("expected 'x-sess' (x-session > metadata), got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeAllEmpty(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{}
+	result := ResolveResponsesSessionScope(req, "", "")
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeMetadataNotObject(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, "not-an-object"),
+	}
+	result := ResolveResponsesSessionScope(req, "", "")
+	if result != "" {
+		t.Errorf("expected empty string for non-object metadata, got %q", result)
+	}
+}
+
+func TestResolveResponsesSessionScopeMetadataNoSessionIDKey(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Metadata: mustMarshal(t, map[string]string{"other_key": "value"}),
+	}
+	result := ResolveResponsesSessionScope(req, "", "")
+	if result != "" {
+		t.Errorf("expected empty string when metadata has no session_id, got %q", result)
 	}
 }

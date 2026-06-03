@@ -25,18 +25,12 @@ import (
 // It converts a Responses API request to Chat Completions format, sends it to the
 // upstream provider, and converts the response back to Responses format.
 func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, responsesReq *dto.OpenAIResponsesRequest) (*dto.Usage, *types.NewAPIError) {
-	// 1. Determine cache scopes
+	// 1. Determine cache scopes — compute session scope once and reuse everywhere
 	ownerScope := codexchat.DetermineOwnerScope(info.TokenId, info.UserId)
-
-	// Extract prompt_cache_key as string from responsesReq.PromptCacheKey (json.RawMessage)
-	var promptCacheKey string
-	if responsesReq.PromptCacheKey != nil {
-		_ = common.Unmarshal(responsesReq.PromptCacheKey, &promptCacheKey)
-	}
-	sessionScope := codexchat.DetermineSessionScope(
-		promptCacheKey,
-		c.GetHeader("x-session-id"),
+	sessionScope := codexchat.ResolveResponsesSessionScope(
+		responsesReq,
 		c.GetHeader("session_id"),
+		c.GetHeader("x-session-id"),
 	)
 
 	// 2. Enrich request with history for continuation recovery
@@ -126,7 +120,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 	// 11. Route to streaming or non-streaming handler
 	if info.IsStream {
-		usage, newApiErr := codexchatResponsesStreamHandler(c, info, httpResp)
+		usage, newApiErr := codexchatResponsesStreamHandler(c, info, httpResp, sessionScope)
 		if newApiErr != nil {
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return nil, newApiErr
@@ -134,7 +128,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 		return usage, nil
 	}
 
-	usage, newApiErr := codexchatResponsesHandler(c, info, httpResp)
+	usage, newApiErr := codexchatResponsesHandler(c, info, httpResp, sessionScope)
 	if newApiErr != nil {
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return nil, newApiErr
@@ -144,7 +138,7 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 // codexchatResponsesHandler handles non-streaming Chat Completions response and
 // converts it back to Responses format.
-func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 1. Read full response body
@@ -169,11 +163,6 @@ func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	// 5. Cache function calls for continuation recovery
 	ownerScope := codexchat.DetermineOwnerScope(info.TokenId, info.UserId)
-	sessionScope := codexchat.DetermineSessionScope(
-		"", // prompt_cache_key not available in handler; fallback to headers
-		c.GetHeader("x-session-id"),
-		c.GetHeader("session_id"),
-	)
 	calls := extractFunctionCallsFromOutput(responsesResp.Output)
 	if len(calls) > 0 {
 		codexchat.GlobalHistoryStore.Store(ownerScope, info.ChannelId, responsesResp.ID, sessionScope, calls)
@@ -192,7 +181,7 @@ func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 // codexchatResponsesStreamHandler handles streaming Chat Completions SSE response
 // and converts it to Responses SSE events.
-func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 1. Create stream transform state
@@ -238,11 +227,6 @@ func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 	// 4. After stream ends: cache function calls for continuation recovery
 	ownerScope := codexchat.DetermineOwnerScope(info.TokenId, info.UserId)
-	sessionScope := codexchat.DetermineSessionScope(
-		"", // prompt_cache_key not available in handler; fallback to headers
-		c.GetHeader("x-session-id"),
-		c.GetHeader("session_id"),
-	)
 	if len(state.CompletedFunctionCalls) > 0 {
 		codexchat.GlobalHistoryStore.Store(ownerScope, info.ChannelId, state.ResponseID, sessionScope, state.CompletedFunctionCalls)
 	}
