@@ -372,6 +372,8 @@ func TestCompletedEvent(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
+	// response.completed is now emitted by Finalize(), not during chunk processing
+	events = append(events, st.Finalize()...)
 	var completed *map[string]any
 	for i := range events {
 		if events[i]["type"] == "response.completed" {
@@ -415,6 +417,7 @@ func TestIncompleteEvent(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
+	events = append(events, st.Finalize()...)
 	var completed *map[string]any
 	for i := range events {
 		if events[i]["type"] == "response.completed" {
@@ -505,6 +508,7 @@ func TestUsageInCompletedEvent(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
+	events = append(events, st.Finalize()...)
 	var completed *map[string]any
 	for i := range events {
 		if events[i]["type"] == "response.completed" {
@@ -994,6 +998,11 @@ func TestFullStreamSimulation(t *testing.T) {
 	}
 	events = st.ProcessChatSSEChunk(chunk3)
 
+	// Finish reason no longer emits response.completed during chunk processing.
+	// Usage from the same chunk IS captured before completion decisions.
+	// Now call Finalize() to emit response.completed (which includes the usage).
+	events = append(events, st.Finalize()...)
+
 	// Should have content_part.done + response.completed
 	var hasDone, hasCompleted bool
 	for _, e := range events {
@@ -1017,9 +1026,7 @@ func TestFullStreamSimulation(t *testing.T) {
 		t.Error("expected response.completed event")
 	}
 
-	// Verify LatestUsage is set (usage is processed after finish reason,
-	// so it won't appear in the completed event from the same chunk, but
-	// it IS stored on the state for future reference)
+	// Verify LatestUsage is set and was captured before Finalize
 	if st.LatestUsage == nil {
 		t.Error("expected LatestUsage to be set")
 	} else if st.LatestUsage.TotalTokens != 7 {
@@ -1233,5 +1240,106 @@ func TestStreamToolCallWithoutCtxDefaultsToFunctionCall(t *testing.T) {
 	}
 	if addedItem["type"] != "function_call" {
 		t.Errorf("expected default item type 'function_call', got %v", addedItem["type"])
+	}
+}
+
+// =============================================================================
+// Stream Finalization Tests
+// =============================================================================
+
+func TestStreamDoesNotCompleteBeforeFinalize(t *testing.T) {
+	st := &StreamTransformState{}
+
+	stop := "stop"
+	content := "done"
+	events1 := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id: "chatcmpl-1",
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &content}, FinishReason: &stop},
+		},
+	})
+
+	for _, e := range events1 {
+		if e["type"] == "response.completed" {
+			t.Fatal("stream should not emit response.completed before Finalize()")
+		}
+	}
+
+	// Now finalize
+	finalEvents := st.Finalize()
+	hasCompleted := false
+	for _, e := range finalEvents {
+		if e["type"] == "response.completed" {
+			hasCompleted = true
+		}
+	}
+	if !hasCompleted {
+		t.Fatal("expected response.completed on Finalize()")
+	}
+}
+
+func TestStreamFinalizeUsesTrailingUsageChunk(t *testing.T) {
+	st := &StreamTransformState{}
+
+	stop := "stop"
+	content := "done"
+	_ = st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id: "chatcmpl-1",
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &content}, FinishReason: &stop},
+		},
+	})
+
+	// Trailing usage chunk after finish reason
+	_ = st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Usage: &dto.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+	})
+
+	finalEvents := st.Finalize()
+	var completedEvent map[string]any
+	for _, e := range finalEvents {
+		if e["type"] == "response.completed" {
+			completedEvent = e
+			break
+		}
+	}
+	if completedEvent == nil {
+		t.Fatal("expected response.completed event")
+	}
+
+	resp, ok := completedEvent["response"].(map[string]any)
+	if !ok {
+		t.Fatal("expected 'response' map in completed event")
+	}
+	usage, ok := resp["usage"].(*dto.Usage)
+	if !ok {
+		t.Fatalf("expected usage to be *dto.Usage, got %T", resp["usage"])
+	}
+	if usage.TotalTokens != 12 {
+		t.Errorf("expected total_tokens=12 in finalized usage, got %d", usage.TotalTokens)
+	}
+}
+
+func TestFinalizeIsIdempotent(t *testing.T) {
+	st := &StreamTransformState{}
+	st.ResponseID = "chatcmpl-1"
+	st.responseStarted = true
+
+	stop := "stop"
+	_ = st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id: "chatcmpl-1",
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, FinishReason: &stop},
+		},
+	})
+
+	first := st.Finalize()
+	second := st.Finalize()
+
+	if len(first) == 0 {
+		t.Fatal("expected at least one event from first Finalize()")
+	}
+	if len(second) != 0 {
+		t.Fatal("second Finalize() should return no events (idempotent)")
 	}
 }

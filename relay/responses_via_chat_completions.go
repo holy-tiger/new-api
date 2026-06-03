@@ -215,18 +215,18 @@ func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				return
 			}
 		}
-
-		// Check for finish reason — signal stream completion
-		if len(chunk.Choices) > 0 {
-			choice := chunk.Choices[0]
-			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				sr.Done()
-				return
-			}
-		}
 	})
 
-	// 4. After stream ends: cache function calls for continuation recovery
+	// 4. Stream ended — finalize and emit response.completed
+	finalEvents := state.Finalize()
+	for _, event := range finalEvents {
+		if err := codexchat.WriteResponsesSSEEvent(c, event); err != nil {
+			// Best-effort write; stream is already ending
+			logger.LogWarn(c, fmt.Sprintf("codexchatResponsesStreamHandler: failed to write final event: %v", err))
+		}
+	}
+
+	// 5. After stream ends: cache function calls for continuation recovery
 	ownerScope := codexchat.DetermineOwnerScope(info.TokenId, info.UserId)
 	if len(state.CompletedFunctionCalls) > 0 {
 		codexchat.GlobalHistoryStore.Store(ownerScope, info.ChannelId, state.ResponseID, sessionScope, state.CompletedFunctionCalls)

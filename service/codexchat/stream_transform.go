@@ -49,6 +49,9 @@ type StreamTransformState struct {
 
 	// Counter for output_index values (incremented per new output item)
 	outputIndexCounter int
+
+	// finishFinalized prevents duplicate response.completed events
+	finishFinalized bool
 }
 
 type toolCallBuilder struct {
@@ -76,6 +79,12 @@ func (st *StreamTransformState) ProcessChatSSEChunk(chunk *dto.ChatCompletionsSt
 		st.responseStarted = true
 	}
 
+	// Always capture usage before any early return — trailing usage chunks
+	// may arrive after the finish reason chunk with no choices.
+	if chunk.Usage != nil {
+		st.LatestUsage = chunk.Usage
+	}
+
 	if len(chunk.Choices) == 0 {
 		return events
 	}
@@ -101,16 +110,12 @@ func (st *StreamTransformState) ProcessChatSSEChunk(chunk *dto.ChatCompletionsSt
 		events = append(events, st.handleToolCallDelta(tc)...)
 	}
 
-	// Handle finish reason
+	// Handle finish reason — finalize output items but do NOT emit response.completed
+	// yet. That happens in Finalize() after the stream ends, so trailing usage chunks
+	// can be captured first.
 	if choice.FinishReason != nil && *choice.FinishReason != "" {
 		st.FinishReason = *choice.FinishReason
 		events = append(events, st.finalizeOutputs()...)
-		events = append(events, st.buildCompletedEvent())
-	}
-
-	// Handle usage
-	if chunk.Usage != nil {
-		st.LatestUsage = chunk.Usage
 	}
 
 	return events
@@ -346,6 +351,30 @@ func (st *StreamTransformState) buildCompletedEvent() map[string]any {
 	return event
 }
 
+// Finalize emits the final response.completed event after the stream has
+// ended. It is idempotent — calling it more than once has no effect.
+// This should be called after StreamScannerHandler returns (i.e., after
+// [DONE] sentinel, upstream EOF, or connection close).
+func (st *StreamTransformState) Finalize() []map[string]any {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	// Guard against double finalization
+	if st.finishFinalized {
+		return nil
+	}
+	st.finishFinalized = true
+
+	// If no finish reason was ever received, finalize outputs now
+	if st.FinishReason == "" {
+		st.FinishReason = "stop"
+		events := st.finalizeOutputs()
+		events = append(events, st.buildCompletedEvent())
+		return events
+	}
+
+	return []map[string]any{st.buildCompletedEvent()}
+}
 // extractThinkContent is a simple state machine to handle <think>...</think> tags.
 // Some providers embed reasoning in text content using these XML tags.
 func extractThinkContent(text string, inThinkTag bool) (plainText string, reasoning string, stillInTag bool) {
