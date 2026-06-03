@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 )
 
@@ -42,9 +43,9 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	created := resp.CreatedAt
 
 	var toolCalls []dto.ToolCallResponse
-	if text == "" && len(resp.Output) > 0 {
+	if len(resp.Output) > 0 {
 		for _, out := range resp.Output {
-			if out.Type != "function_call" {
+			if !isResponsesToolCallType(out.Type) {
 				continue
 			}
 			name := strings.TrimSpace(out.Name)
@@ -66,9 +67,12 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 		}
 	}
 
-	finishReason := "stop"
-	if len(toolCalls) > 0 {
+	finishReason := responsesFinishReason(resp)
+	if finishReason == "" && len(toolCalls) > 0 {
 		finishReason = "tool_calls"
+	}
+	if finishReason == "" {
+		finishReason = "stop"
 	}
 
 	msg := dto.Message{
@@ -77,7 +81,6 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	}
 	if len(toolCalls) > 0 {
 		msg.SetToolCalls(toolCalls)
-		msg.Content = ""
 	}
 
 	out := &dto.OpenAITextResponse{
@@ -96,6 +99,38 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	}
 
 	return out, usage, nil
+}
+
+func responsesFinishReason(resp *dto.OpenAIResponsesResponse) string {
+	if resp == nil {
+		return ""
+	}
+
+	var status string
+	if len(resp.Status) > 0 {
+		_ = common.Unmarshal(resp.Status, &status)
+	}
+	if status != "incomplete" {
+		return ""
+	}
+	if resp.IncompleteDetails == nil {
+		return "length"
+	}
+	switch resp.IncompleteDetails.Reason {
+	case "", "max_output_tokens":
+		return "length"
+	default:
+		return "length"
+	}
+}
+
+func isResponsesToolCallType(itemType string) bool {
+	switch itemType {
+	case "function_call", "custom_tool_call", "tool_search_call":
+		return true
+	default:
+		return false
+	}
 }
 
 func ExtractOutputTextFromResponses(resp *dto.OpenAIResponsesResponse) string {

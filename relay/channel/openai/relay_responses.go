@@ -95,14 +95,16 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		}
 		sendResponsesStreamData(c, streamResponse, data)
 		switch streamResponse.Type {
-		case "response.completed":
+		case "response.completed", "response.incomplete":
 			if streamResponse.Response != nil {
 				if streamResponse.Response.Usage != nil {
 					if streamResponse.Response.Usage.InputTokens != 0 {
 						usage.PromptTokens = streamResponse.Response.Usage.InputTokens
+						usage.InputTokens = streamResponse.Response.Usage.InputTokens
 					}
 					if streamResponse.Response.Usage.OutputTokens != 0 {
 						usage.CompletionTokens = streamResponse.Response.Usage.OutputTokens
+						usage.OutputTokens = streamResponse.Response.Usage.OutputTokens
 					}
 					if streamResponse.Response.Usage.TotalTokens != 0 {
 						usage.TotalTokens = streamResponse.Response.Usage.TotalTokens

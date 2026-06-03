@@ -234,10 +234,6 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if callID == "" {
 			return true
 		}
-		if outputText.Len() > 0 {
-			// Prefer streaming assistant text over tool calls to match non-stream behavior.
-			return true
-		}
 		if !sendStartIfNeeded() {
 			return false
 		}
@@ -391,7 +387,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			if streamResp.Item == nil {
 				break
 			}
-			if streamResp.Item.Type != "function_call" {
+			if !isResponsesToolCallEventType(streamResp.Item.Type) {
 				break
 			}
 
@@ -442,7 +438,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 		case "response.function_call_arguments.done":
 
-		case "response.completed":
+		case "response.completed", "response.incomplete":
 			if streamResp.Response != nil {
 				if streamResp.Response.Model != "" {
 					model = streamResp.Response.Model
@@ -483,10 +479,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 				if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 					info.ClaudeConvertInfo.Usage = usage
 				}
-				finishReason := "stop"
-				if sawToolCall && outputText.Len() == 0 {
-					finishReason = "tool_calls"
-				}
+				finishReason := responsesStreamFinishReason(streamResp, sawToolCall, outputText.Len() == 0)
 				stop := helper.GenerateStopResponse(responseId, createAt, model, finishReason)
 				if !sendChatChunk(stop) {
 					sr.Stop(streamErr)
@@ -528,10 +521,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 			info.ClaudeConvertInfo.Usage = usage
 		}
-		finishReason := "stop"
-		if sawToolCall && outputText.Len() == 0 {
-			finishReason = "tool_calls"
-		}
+		finishReason := responsesStreamFinishReason(dto.ResponsesStreamResponse{}, sawToolCall, outputText.Len() == 0)
 		stop := helper.GenerateStopResponse(responseId, createAt, model, finishReason)
 		if !sendChatChunk(stop) {
 			return nil, streamErr
@@ -547,4 +537,23 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		helper.Done(c)
 	}
 	return usage, nil
+}
+
+func isResponsesToolCallEventType(itemType string) bool {
+	switch itemType {
+	case "function_call", "custom_tool_call", "tool_search_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func responsesStreamFinishReason(streamResp dto.ResponsesStreamResponse, sawToolCall bool, toolCallsOnly bool) string {
+	if streamResp.Type == "response.incomplete" {
+		return "length"
+	}
+	if sawToolCall {
+		return "tool_calls"
+	}
+	return "stop"
 }
