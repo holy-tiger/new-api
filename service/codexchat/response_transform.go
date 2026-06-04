@@ -6,12 +6,122 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 )
+
+func customToolInputFromArguments(arguments string) json.RawMessage {
+	if arguments == "" {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := common.Unmarshal([]byte(arguments), &payload); err != nil {
+		return json.RawMessage(`""`)
+	}
+	if input, ok := payload[customToolInputField]; ok {
+		return input
+	}
+	return nil
+}
+
+func toolSearchArgumentsFromString(arguments string) json.RawMessage {
+	if strings.TrimSpace(arguments) == "" {
+		return json.RawMessage(`{}`)
+	}
+	var value any
+	if err := common.Unmarshal([]byte(arguments), &value); err == nil {
+		if payload, ok := value.(map[string]any); ok && payload != nil {
+			data, marshalErr := common.Marshal(payload)
+			if marshalErr == nil {
+				return data
+			}
+		}
+		if query, ok := value.(string); ok {
+			arguments = query
+		}
+	}
+	data, err := common.Marshal(map[string]any{
+		"query": arguments,
+	})
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return data
+}
+
+func responseToolCallItemID(callID string, chatName string, toolCtx *ChatToolContext) string {
+	if toolCtx != nil {
+		if spec, ok := toolCtx.LookupToolSpec(chatName); ok && spec.Kind == ChatToolKindCustom {
+			return "ctc_" + callID
+		}
+	}
+	return "fc_" + callID
+}
+
+func marshalJSONString(value string) json.RawMessage {
+	data, err := common.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return data
+}
+
+func restoreResponsesToolOutput(tc dto.ToolCallResponse, toolCtx *ChatToolContext) dto.ResponsesOutput {
+	spec, ok := toolCtx.LookupToolSpec(tc.Function.Name)
+	if !ok && toolCtx != nil {
+		switch toolCtx.RestoreToolType(tc.Function.Name, "function_call") {
+		case "custom_tool_call":
+			spec = ChatToolSpec{
+				Kind:     ChatToolKindCustom,
+				Name:     tc.Function.Name,
+				ChatName: tc.Function.Name,
+			}
+			ok = true
+		case "tool_search_call":
+			spec = ChatToolSpec{
+				Kind:     ChatToolKindToolSearch,
+				Name:     toolSearchProxyName,
+				ChatName: tc.Function.Name,
+			}
+			ok = true
+		}
+	}
+
+	output := dto.ResponsesOutput{
+		Type:   "function_call",
+		ID:     tc.ID,
+		CallId: tc.ID,
+		Status: "completed",
+		Name:   tc.Function.Name,
+	}
+
+	if !ok {
+		output.Arguments = marshalJSONString(tc.Function.Arguments)
+		return output
+	}
+
+	switch spec.Kind {
+	case ChatToolKindCustom:
+		output.Type = "custom_tool_call"
+		output.Name = spec.Name
+		output.Input = customToolInputFromArguments(tc.Function.Arguments)
+	case ChatToolKindToolSearch:
+		output.Type = "tool_search_call"
+		output.Name = spec.Name
+		output.Arguments = toolSearchArgumentsFromString(tc.Function.Arguments)
+	default:
+		output.Type = "function_call"
+		output.Name = spec.Name
+		output.Namespace = spec.Namespace
+		output.Arguments = marshalJSONString(tc.Function.Arguments)
+	}
+
+	return output
+}
 
 // ChatCompletionsResponseToResponsesResponse converts a Chat Completions JSON
 // response into a Codex Responses API JSON response. If toolCtx is provided,
@@ -67,16 +177,7 @@ func ChatCompletionsResponseToResponsesResponse(chatResp *dto.OpenAITextResponse
 		var toolCalls []dto.ToolCallResponse
 		if err := common.Unmarshal(choice.Message.ToolCalls, &toolCalls); err == nil {
 			for _, tc := range toolCalls {
-				// Restore the original Responses tool type from context
-				toolType := toolCtx.RestoreToolType(tc.Function.Name, "function_call")
-				resp.Output = append(resp.Output, dto.ResponsesOutput{
-					Type:      toolType,
-					ID:        tc.ID,
-					CallId:    tc.ID,
-					Name:      tc.Function.Name,
-					Arguments: json.RawMessage(tc.Function.Arguments),
-					Status:    "completed",
-				})
+				resp.Output = append(resp.Output, restoreResponsesToolOutput(tc, toolCtx))
 			}
 		} else {
 			logger.LogWarn(context.Background(), "[codexchat] failed to unmarshal ToolCalls from chat response: "+err.Error())
@@ -112,4 +213,14 @@ func generateResponsesID() string {
 		binary.LittleEndian.PutUint64(b[8:], uint64(ts>>1))
 	}
 	return "resp_" + hex.EncodeToString(b)[:24]
+}
+
+func responseIDFromChatID(id string) string {
+	if id == "" {
+		return generateResponsesID()
+	}
+	if strings.HasPrefix(id, "resp_") {
+		return id
+	}
+	return "resp_" + id
 }

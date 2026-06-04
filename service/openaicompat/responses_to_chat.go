@@ -116,7 +116,7 @@ func responsesFinishReason(resp *dto.OpenAIResponsesResponse) string {
 	if resp.IncompleteDetails == nil {
 		return "length"
 	}
-	switch resp.IncompleteDetails.Reason {
+	switch resp.IncompleteDetails.Reasoning {
 	case "", "max_output_tokens":
 		return "length"
 	default:

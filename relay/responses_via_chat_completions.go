@@ -1,11 +1,16 @@
 package relay
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -20,6 +25,110 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+type codexResponsesTrace struct {
+	mu      sync.Mutex
+	path    string
+	builder strings.Builder
+}
+
+func newCodexResponsesTrace(c *gin.Context, info *relaycommon.RelayInfo) *codexResponsesTrace {
+	defer func() {
+		if recover() != nil {
+			// Best-effort tracing only; never let trace collection affect relay flow.
+		}
+	}()
+	requestID := ""
+	requestPath := ""
+	remoteAddr := ""
+	channelID := 0
+	if c != nil {
+		requestID = c.GetString(common.RequestIdKey)
+		if c.Request != nil && c.Request.URL != nil {
+			requestPath = c.Request.URL.Path
+		}
+		if c.Request != nil {
+			remoteAddr = c.Request.RemoteAddr
+		}
+	}
+	if info != nil {
+		channelID = info.ChannelId
+	}
+	if requestID == "" {
+		requestID = fmt.Sprintf("trace-%d", time.Now().UnixNano())
+	}
+	traceDir := "/tmp/new-api-codex-traces"
+	path := filepath.Join(traceDir, requestID+".jsonl")
+	trace := &codexResponsesTrace{path: path}
+	trace.builder.WriteString(fmt.Sprintf("{\"meta\":{\"request_id\":%q,\"request_path\":%q,\"channel_id\":%d,\"remote_addr\":%q}}\n",
+		requestID,
+		requestPath,
+		channelID,
+		remoteAddr,
+	))
+	return trace
+}
+
+func (t *codexResponsesTrace) record(event map[string]any) {
+	if t == nil || event == nil {
+		return
+	}
+	data, err := common.Marshal(event)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.builder.Write(data)
+	t.builder.WriteByte('\n')
+}
+
+func (t *codexResponsesTrace) recordDone() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.builder.WriteString("{\"done\":true}\n")
+}
+
+func (t *codexResponsesTrace) flush(c *gin.Context) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(t.path), 0o755); err != nil {
+		logger.LogWarn(c, fmt.Sprintf("codex responses trace mkdir failed: %v", err))
+		return
+	}
+	if err := os.WriteFile(t.path, []byte(t.builder.String()), 0o644); err != nil {
+		logger.LogWarn(c, fmt.Sprintf("codex responses trace write failed: %v", err))
+		return
+	}
+	logger.LogInfo(c, fmt.Sprintf("codex responses trace written: %s", t.path))
+}
+
+func writeCodexChatRequestTrace(c *gin.Context, payload []byte) {
+	if c == nil || len(payload) == 0 {
+		return
+	}
+	requestID := c.GetString(common.RequestIdKey)
+	if requestID == "" {
+		requestID = fmt.Sprintf("trace-%d", time.Now().UnixNano())
+	}
+	traceDir := "/tmp/new-api-codex-traces"
+	path := filepath.Join(traceDir, requestID+".chat-request.json")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		logger.LogWarn(c, fmt.Sprintf("codex chat request trace mkdir failed: %v", err))
+		return
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		logger.LogWarn(c, fmt.Sprintf("codex chat request trace write failed: %v", err))
+		return
+	}
+	logger.LogInfo(c, fmt.Sprintf("codex chat request trace written: %s", path))
+}
 
 // responsesViaChatCompletions bridges /v1/responses to /v1/chat/completions.
 // It converts a Responses API request to Chat Completions format, sends it to the
@@ -94,6 +203,8 @@ func responsesViaChatCompletions(c *gin.Context, info *relaycommon.RelayInfo, ad
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
+
+	writeCodexChatRequestTrace(c, jsonData)
 
 	// 8. Send request to upstream
 	requestBody := bytes.NewBuffer(jsonData)
@@ -183,47 +294,121 @@ func codexchatResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 // and converts it to Responses SSE events.
 func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, sessionScope string, toolCtx *codexchat.ChatToolContext) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
+	trace := newCodexResponsesTrace(c, info)
+	defer trace.flush(c)
 
 	// 1. Create stream transform state
 	state := &codexchat.StreamTransformState{
-		ResponseID: helper.GetResponseID(c),
-		ToolCtx:    toolCtx,
+		ResponseID:              helper.GetResponseID(c),
+		ToolCtx:                 toolCtx,
+		SuppressReasoningOutput: true,
 	}
 
 	// 2. Set SSE headers
 	helper.SetEventStreamHeaders(c)
 
-	// 3. Stream scan and transform
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		// Check for [DONE] sentinel
-		if strings.TrimSpace(data) == "[DONE]" {
-			return
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	reader := bufio.NewReader(resp.Body)
+	streamFailed := false
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+			streamFailed = true
+		default:
+		}
+		if streamFailed {
+			break
 		}
 
-		// Unmarshal as Chat Completions SSE chunk
+		block, err := readSSEBlock(reader)
+		if err != nil {
+			if err == io.EOF {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+				break
+			}
+			info.StreamStatus.RecordError(err.Error())
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
+			failedEvent := state.BuildFailedEvent(fmt.Sprintf("Stream error: %v", err), "stream_error")
+			trace.record(failedEvent)
+			if writeErr := codexchat.WriteResponsesSSEEvent(c, failedEvent); writeErr != nil {
+				logger.LogWarn(c, fmt.Sprintf("codexchatResponsesStreamHandler: failed to write stream_error event: %v", writeErr))
+			}
+			streamFailed = true
+			break
+		}
+		if block.Data == "" {
+			continue
+		}
+		if strings.TrimSpace(block.Data) == "[DONE]" {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+			break
+		}
+
+		info.SetFirstResponseTime()
+		info.ReceivedResponseCount++
+
+		payload := make(map[string]any)
+		if err := common.Unmarshal([]byte(block.Data), &payload); err != nil {
+			info.StreamStatus.RecordError(err.Error())
+			continue
+		}
+
+		if block.Event == "error" || payload["error"] != nil {
+			message, errorType := extractSSEError(payload)
+			if message == "" {
+				message = "upstream stream returned an error event"
+			}
+			failedEvent := state.BuildFailedEvent(message, errorType)
+			trace.record(failedEvent)
+			if writeErr := codexchat.WriteResponsesSSEEvent(c, failedEvent); writeErr != nil {
+				logger.LogWarn(c, fmt.Sprintf("codexchatResponsesStreamHandler: failed to write response.failed event: %v", writeErr))
+			}
+			info.StreamStatus.RecordError(message)
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, nil)
+			streamFailed = true
+			break
+		}
+
 		var chunk dto.ChatCompletionsStreamResponse
-		if err := common.Unmarshal([]byte(data), &chunk); err != nil {
-			sr.Error(err)
-			return
+		if err := common.Unmarshal([]byte(block.Data), &chunk); err != nil {
+			info.StreamStatus.RecordError(err.Error())
+			continue
 		}
 
-		// Process the chunk and emit Responses SSE events
 		events := state.ProcessChatSSEChunk(&chunk)
 		for _, event := range events {
+			trace.record(event)
 			if err := codexchat.WriteResponsesSSEEvent(c, event); err != nil {
-				sr.Error(err)
-				return
+				info.StreamStatus.RecordError(err.Error())
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
+				streamFailed = true
+				break
 			}
 		}
-	})
-
-	// 4. Stream ended — finalize and emit response.completed
-	finalEvents := state.Finalize()
-	for _, event := range finalEvents {
-		if err := codexchat.WriteResponsesSSEEvent(c, event); err != nil {
-			// Best-effort write; stream is already ending
-			logger.LogWarn(c, fmt.Sprintf("codexchatResponsesStreamHandler: failed to write final event: %v", err))
+		if streamFailed {
+			break
 		}
+	}
+
+	if !streamFailed {
+		finalEvents := state.Finalize()
+		for _, event := range finalEvents {
+			trace.record(event)
+			if err := codexchat.WriteResponsesSSEEvent(c, event); err != nil {
+				// Best-effort write; stream is already ending
+				logger.LogWarn(c, fmt.Sprintf("codexchatResponsesStreamHandler: failed to write final event: %v", err))
+			}
+		}
+		helper.Done(c)
+	}
+	trace.recordDone()
+
+	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
+		logger.LogInfo(c, fmt.Sprintf("stream ended: %s", info.StreamStatus.Summary()))
+	} else {
+		logger.LogError(c, fmt.Sprintf("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
 	}
 
 	// 5. After stream ends: cache function calls for continuation recovery
@@ -232,13 +417,99 @@ func codexchatResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		codexchat.GlobalHistoryStore.Store(ownerScope, info.ChannelId, state.ResponseID, sessionScope, state.CompletedFunctionCalls)
 	}
 
-	// 5. Recover usage from state, fallback to empty usage
+	if streamFailed {
+		return nil, nil
+	}
+
+	// 6. Recover usage from state, fallback to empty usage
 	var usage dto.Usage
 	if state.LatestUsage != nil {
 		usage = *state.LatestUsage
 	}
 
 	return &usage, nil
+}
+
+type sseBlock struct {
+	Event string
+	Data  string
+}
+
+func readSSEBlock(reader *bufio.Reader) (sseBlock, error) {
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return sseBlock{}, err
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if len(lines) == 0 {
+				if err == io.EOF {
+					return sseBlock{}, io.EOF
+				}
+				continue
+			}
+			return parseSSEBlock(lines), nil
+		}
+		lines = append(lines, line)
+
+		if err == io.EOF {
+			if len(lines) == 0 {
+				return sseBlock{}, io.EOF
+			}
+			return parseSSEBlock(lines), nil
+		}
+	}
+}
+
+func parseSSEBlock(lines []string) sseBlock {
+	block := sseBlock{}
+	dataLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, ":"):
+			continue
+		case strings.HasPrefix(line, "event:"):
+			block.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	block.Data = strings.Join(dataLines, "\n")
+	return block
+}
+
+func extractSSEError(payload map[string]any) (string, string) {
+	if payload == nil {
+		return "", ""
+	}
+	errValue := payload["error"]
+	if errValue == nil {
+		errValue = payload
+	}
+	errMap, ok := errValue.(map[string]any)
+	if !ok {
+		if text := common.Interface2String(errValue); text != "" {
+			return text, ""
+		}
+		return fmt.Sprintf("%v", errValue), ""
+	}
+
+	message := common.Interface2String(errMap["message"])
+	if message == "" {
+		message = common.Interface2String(errMap["detail"])
+	}
+	if message == "" {
+		message = fmt.Sprintf("%v", errMap)
+	}
+
+	errorType := common.Interface2String(errMap["type"])
+	if errorType == "" {
+		errorType = common.Interface2String(errMap["code"])
+	}
+	return message, errorType
 }
 
 // extractFunctionCallsFromOutput iterates over Responses output items and

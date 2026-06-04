@@ -15,7 +15,7 @@ func TestResponsesResponseToChatCompletionsResponse_MapsIncompleteToLength(t *te
 		Model:     "gpt-4o",
 		Status:    json.RawMessage(`"incomplete"`),
 		IncompleteDetails: &dto.IncompleteDetails{
-			Reason: "max_output_tokens",
+			Reasoning: "max_output_tokens",
 		},
 		Output: []dto.ResponsesOutput{
 			{

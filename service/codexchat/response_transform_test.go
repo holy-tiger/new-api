@@ -179,7 +179,7 @@ func TestToolCallsToFunctionCall(t *testing.T) {
 	}
 
 	// Verify arguments
-	argsStr := string(fc.Arguments)
+	argsStr := dto.ResponsesArgumentsString(fc.Arguments)
 	if argsStr != `{"city":"NYC"}` {
 		t.Errorf("expected arguments '{\"city\":\"NYC\"}', got %q", argsStr)
 	}
@@ -462,8 +462,8 @@ func TestMultipleToolCalls(t *testing.T) {
 		if fc.Name != expectedNames[i] {
 			t.Errorf("function_call[%d]: expected name %q, got %q", i, expectedNames[i], fc.Name)
 		}
-		if string(fc.Arguments) != expectedArgs[i] {
-			t.Errorf("function_call[%d]: expected args %q, got %q", i, expectedArgs[i], string(fc.Arguments))
+		if dto.ResponsesArgumentsString(fc.Arguments) != expectedArgs[i] {
+			t.Errorf("function_call[%d]: expected args %q, got %q", i, expectedArgs[i], dto.ResponsesArgumentsString(fc.Arguments))
 		}
 		if fc.Status != "completed" {
 			t.Errorf("function_call[%d]: expected status 'completed', got %q", i, fc.Status)
@@ -662,8 +662,8 @@ func TestChatResponseRestoresCustomToolType(t *testing.T) {
 			ID:   "call-1",
 			Type: "function",
 			Function: dto.FunctionResponse{
-				Name:      "custom_my_tool",
-				Arguments: `{}`,
+				Name:      "my_tool",
+				Arguments: `{"input":"scan the repo"}`,
 			},
 		},
 	}
@@ -685,10 +685,13 @@ func TestChatResponseRestoresCustomToolType(t *testing.T) {
 		},
 	}
 
-	// Build tool context with custom tool mapping
 	toolCtx := &ChatToolContext{
-		chatNameToResponseType: map[string]string{
-			"custom_my_tool": "custom_tool_call",
+		chatNameToSpec: map[string]ChatToolSpec{
+			"my_tool": {
+				Kind:     ChatToolKindCustom,
+				Name:     "my_tool",
+				ChatName: "my_tool",
+			},
 		},
 	}
 
@@ -706,8 +709,133 @@ func TestChatResponseRestoresCustomToolType(t *testing.T) {
 	if len(fcItems) != 1 {
 		t.Fatalf("expected 1 custom_tool_call output, got %d (output types: %v)", len(fcItems), outputTypes(resp.Output))
 	}
-	if fcItems[0].Name != "custom_my_tool" {
-		t.Errorf("expected name 'custom_my_tool', got %q", fcItems[0].Name)
+	if fcItems[0].Name != "my_tool" {
+		t.Errorf("expected name 'my_tool', got %q", fcItems[0].Name)
+	}
+	if string(fcItems[0].Input) != `"scan the repo"` {
+		t.Errorf("expected input %q, got %s", `"scan the repo"`, string(fcItems[0].Input))
+	}
+}
+
+func TestChatResponseRestoresToolSearchCallType(t *testing.T) {
+	tcs := []dto.ToolCallResponse{
+		{
+			ID:   "call-tool-search-1",
+			Type: "function",
+			Function: dto.FunctionResponse{
+				Name:      "tool_search",
+				Arguments: `{"query":"gmail search emails","limit":10}`,
+			},
+		},
+	}
+	tcJSON, err := common.Marshal(tcs)
+	if err != nil {
+		t.Fatalf("failed to marshal tool calls: %v", err)
+	}
+
+	chatResp := &dto.OpenAITextResponse{
+		Model: "gpt-4o",
+		Choices: []dto.OpenAITextResponseChoice{
+			{
+				FinishReason: "tool_calls",
+				Message: dto.Message{
+					Role:      "assistant",
+					ToolCalls: tcJSON,
+				},
+			},
+		},
+	}
+
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"tool_search": {
+				Kind:     ChatToolKindToolSearch,
+				Name:     "tool_search",
+				ChatName: "tool_search",
+			},
+		},
+	}
+
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, toolCtx)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if len(resp.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(resp.Output))
+	}
+	if resp.Output[0].Type != "tool_search_call" {
+		t.Fatalf("expected tool_search_call, got %q", resp.Output[0].Type)
+	}
+	var args map[string]any
+	if err := common.Unmarshal(resp.Output[0].Arguments, &args); err != nil {
+		t.Fatalf("expected tool_search_call arguments to be valid JSON object, got %s (err=%v)", string(resp.Output[0].Arguments), err)
+	}
+	if args["query"] != "gmail search emails" {
+		t.Fatalf("expected query to round-trip, got %#v", args)
+	}
+	if args["limit"] != float64(10) {
+		t.Fatalf("expected limit to round-trip, got %#v", args)
+	}
+}
+
+func TestChatResponseRestoresNamespaceFunctionCallMetadata(t *testing.T) {
+	tcs := []dto.ToolCallResponse{
+		{
+			ID:   "call-ns-1",
+			Type: "function",
+			Function: dto.FunctionResponse{
+				Name:      "mcp__codex_apps__gmail__search_threads",
+				Arguments: `{"query":"inbox"}`,
+			},
+		},
+	}
+	tcJSON, err := common.Marshal(tcs)
+	if err != nil {
+		t.Fatalf("failed to marshal tool calls: %v", err)
+	}
+
+	chatResp := &dto.OpenAITextResponse{
+		Model: "gpt-4o",
+		Choices: []dto.OpenAITextResponseChoice{
+			{
+				FinishReason: "tool_calls",
+				Message: dto.Message{
+					Role:      "assistant",
+					ToolCalls: tcJSON,
+				},
+			},
+		},
+	}
+
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"mcp__codex_apps__gmail__search_threads": {
+				Kind:      ChatToolKindNamespace,
+				Name:      "search_threads",
+				Namespace: "mcp__codex_apps__gmail",
+				ChatName:  "mcp__codex_apps__gmail__search_threads",
+			},
+		},
+	}
+
+	resp := ChatCompletionsResponseToResponsesResponse(chatResp, toolCtx)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if len(resp.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(resp.Output))
+	}
+	if resp.Output[0].Type != "function_call" {
+		t.Fatalf("expected function_call, got %q", resp.Output[0].Type)
+	}
+	if resp.Output[0].Name != "search_threads" {
+		t.Fatalf("expected restored name search_threads, got %q", resp.Output[0].Name)
+	}
+	if resp.Output[0].Namespace != "mcp__codex_apps__gmail" {
+		t.Fatalf("expected restored namespace, got %q", resp.Output[0].Namespace)
+	}
+	if string(resp.Output[0].Arguments) != `"{\"query\":\"inbox\"}"` {
+		t.Fatalf("expected namespace function_call arguments to remain stringified JSON, got %s", string(resp.Output[0].Arguments))
 	}
 }
 

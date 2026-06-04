@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -35,17 +36,33 @@ func TestSingleTextChunk(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events (added + delta), got %d", len(events))
+	if len(events) < 5 {
+		t.Fatalf("expected at least 5 events (created + in_progress + added + part added + delta), got %d", len(events))
 	}
 
-	// First event should be output_item.added
-	if events[0]["type"] != "response.output_item.added" {
-		t.Errorf("expected first event 'response.output_item.added', got %v", events[0]["type"])
+	// First event should be response.created
+	if events[0]["type"] != "response.created" {
+		t.Errorf("expected first event 'response.created', got %v", events[0]["type"])
+	}
+	createdResp, ok := events[0]["response"].(map[string]any)
+	if !ok {
+		t.Fatal("expected response.created to include response object")
+	}
+	if id, _ := createdResp["id"].(string); !strings.HasPrefix(id, "resp_") {
+		t.Fatalf("expected Responses-style id with resp_ prefix, got %v", createdResp["id"])
+	}
+
+	if events[1]["type"] != "response.in_progress" {
+		t.Fatalf("expected second event 'response.in_progress', got %v", events[1]["type"])
+	}
+
+	// Third event should be output_item.added
+	if events[2]["type"] != "response.output_item.added" {
+		t.Fatalf("expected third event 'response.output_item.added', got %v", events[2]["type"])
 	}
 
 	// Verify item details in added event
-	item, ok := events[0]["item"].(map[string]any)
+	item, ok := events[2]["item"].(map[string]any)
 	if !ok {
 		t.Fatal("expected 'item' map in added event")
 	}
@@ -55,13 +72,107 @@ func TestSingleTextChunk(t *testing.T) {
 	if item["role"] != "assistant" {
 		t.Errorf("expected item role 'assistant', got %v", item["role"])
 	}
-
-	// Second event should be output_text.delta
-	if events[1]["type"] != "response.output_text.delta" {
-		t.Errorf("expected second event 'response.output_text.delta', got %v", events[1]["type"])
+	if content, ok := item["content"].([]any); !ok || len(content) != 0 {
+		t.Fatalf("expected message added item to include empty content array, got %#v", item["content"])
 	}
-	if events[1]["delta"] != "Hello" {
-		t.Errorf("expected delta 'Hello', got %v", events[1]["delta"])
+
+	if events[3]["type"] != "response.content_part.added" {
+		t.Fatalf("expected fourth event 'response.content_part.added', got %v", events[3]["type"])
+	}
+
+	// Fifth event should be output_text.delta
+	if events[4]["type"] != "response.output_text.delta" {
+		t.Errorf("expected fifth event 'response.output_text.delta', got %v", events[4]["type"])
+	}
+	if events[4]["delta"] != "Hello" {
+		t.Errorf("expected delta 'Hello', got %v", events[4]["delta"])
+	}
+}
+
+func TestSingleTextChunk_EmitsResponseCreatedAndContentPartContext(t *testing.T) {
+	st := &StreamTransformState{}
+	content := "Hello"
+	chunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					Content: &content,
+				},
+			},
+		},
+	}
+
+	events := st.ProcessChatSSEChunk(chunk)
+	if len(events) < 5 {
+		t.Fatalf("expected at least 5 events (created + in_progress + item added + part added + delta), got %d", len(events))
+	}
+
+	if events[0]["type"] != "response.created" {
+		t.Fatalf("expected first event response.created, got %v", events[0]["type"])
+	}
+	if events[1]["type"] != "response.in_progress" {
+		t.Fatalf("expected second event response.in_progress, got %v", events[1]["type"])
+	}
+	if events[2]["type"] != "response.output_item.added" {
+		t.Fatalf("expected third event response.output_item.added, got %v", events[2]["type"])
+	}
+	if events[3]["type"] != "response.content_part.added" {
+		t.Fatalf("expected fourth event response.content_part.added, got %v", events[3]["type"])
+	}
+	if events[4]["type"] != "response.output_text.delta" {
+		t.Fatalf("expected fifth event response.output_text.delta, got %v", events[4]["type"])
+	}
+
+	if events[4]["content_index"] != 0 {
+		t.Fatalf("expected output_text.delta content_index=0, got %v", events[4]["content_index"])
+	}
+}
+
+func TestTextStream_UsesStableOutputIndexForSameMessage(t *testing.T) {
+	st := &StreamTransformState{}
+	c1 := "Hello"
+	c2 := " world"
+
+	events1 := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &c1}},
+		},
+	})
+	events2 := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &c2}},
+		},
+	})
+
+	var firstDelta map[string]any
+	for _, e := range events1 {
+		if e["type"] == "response.output_text.delta" {
+			firstDelta = e
+			break
+		}
+	}
+	if firstDelta == nil {
+		t.Fatal("expected first chunk to contain response.output_text.delta")
+	}
+	if len(events2) == 0 {
+		t.Fatal("expected second chunk to emit at least one event")
+	}
+	if events2[0]["type"] != "response.output_text.delta" {
+		t.Fatalf("expected second chunk first event response.output_text.delta, got %v", events2[0]["type"])
+	}
+
+	if firstDelta["output_index"] != events2[0]["output_index"] {
+		t.Fatalf("expected stable output_index across text deltas, got %v then %v", firstDelta["output_index"], events2[0]["output_index"])
+	}
+	if events2[0]["content_index"] != 0 {
+		t.Fatalf("expected second delta content_index=0, got %v", events2[0]["content_index"])
 	}
 }
 
@@ -125,6 +236,67 @@ func TestEmptyChunk(t *testing.T) {
 	}
 }
 
+func TestSuppressReasoningOutputHidesReasoningEvents(t *testing.T) {
+	st := &StreamTransformState{SuppressReasoningOutput: true}
+	reasoning := "The review is complete. Let me now write the final summary."
+	content := "Findings first."
+	finishReason := "stop"
+
+	events := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "deepseek-v4-pro",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ReasoningContent: &reasoning,
+					Content:          &content,
+				},
+			},
+		},
+	})
+	events = append(events, st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "deepseek-v4-pro",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index:        0,
+				FinishReason: &finishReason,
+			},
+		},
+	})...)
+	events = append(events, st.Finalize()...)
+
+	for _, event := range events {
+		eventType, _ := event["type"].(string)
+		if strings.HasPrefix(eventType, "response.reasoning_") {
+			t.Fatalf("expected no visible reasoning events, got %#v", event)
+		}
+		if eventType == "response.output_item.added" {
+			item, _ := event["item"].(map[string]any)
+			if item["type"] == "reasoning" {
+				t.Fatalf("expected no reasoning output item, got %#v", item)
+			}
+		}
+	}
+
+	completed := events[len(events)-1]
+	if completed["type"] != "response.completed" {
+		t.Fatalf("expected final event response.completed, got %v", completed["type"])
+	}
+	response := completed["response"].(map[string]any)
+	output := response["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected only visible message output, got %#v", output)
+	}
+	item := output[0].(map[string]any)
+	if item["type"] != "message" {
+		t.Fatalf("expected message output, got %#v", item)
+	}
+}
+
 // =============================================================================
 // Reasoning Streaming Tests
 // =============================================================================
@@ -147,15 +319,21 @@ func TestFirstReasoningChunk(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events (added + delta), got %d", len(events))
+	if len(events) < 5 {
+		t.Fatalf("expected at least 5 events (created + in_progress + added + summary part + delta), got %d", len(events))
 	}
 
-	// First event should be output_item.added (reasoning)
-	if events[0]["type"] != "response.output_item.added" {
-		t.Errorf("expected first event 'response.output_item.added', got %v", events[0]["type"])
+	if events[0]["type"] != "response.created" {
+		t.Errorf("expected first event 'response.created', got %v", events[0]["type"])
 	}
-	item, ok := events[0]["item"].(map[string]any)
+
+	if events[1]["type"] != "response.in_progress" {
+		t.Errorf("expected second event 'response.in_progress', got %v", events[1]["type"])
+	}
+	if events[2]["type"] != "response.output_item.added" {
+		t.Errorf("expected third event 'response.output_item.added', got %v", events[2]["type"])
+	}
+	item, ok := events[2]["item"].(map[string]any)
 	if !ok {
 		t.Fatal("expected 'item' map in added event")
 	}
@@ -163,12 +341,15 @@ func TestFirstReasoningChunk(t *testing.T) {
 		t.Errorf("expected item type 'reasoning', got %v", item["type"])
 	}
 
-	// Second event should be reasoning_summary_text.delta
-	if events[1]["type"] != "response.reasoning_summary_text.delta" {
-		t.Errorf("expected second event 'response.reasoning_summary_text.delta', got %v", events[1]["type"])
+	if events[3]["type"] != "response.reasoning_summary_part.added" {
+		t.Errorf("expected fourth event 'response.reasoning_summary_part.added', got %v", events[3]["type"])
 	}
-	if events[1]["delta"] != reasoning {
-		t.Errorf("expected delta '%s', got %v", reasoning, events[1]["delta"])
+	// Fifth event should be reasoning_summary_text.delta
+	if events[4]["type"] != "response.reasoning_summary_text.delta" {
+		t.Errorf("expected fifth event 'response.reasoning_summary_text.delta', got %v", events[4]["type"])
+	}
+	if events[4]["delta"] != reasoning {
+		t.Errorf("expected delta '%s', got %v", reasoning, events[4]["delta"])
 	}
 }
 
@@ -245,15 +426,22 @@ func TestToolCallStart(t *testing.T) {
 	}
 
 	events := st.ProcessChatSSEChunk(chunk)
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events (added + arguments delta), got %d", len(events))
+	if len(events) < 4 {
+		t.Fatalf("expected at least 4 events (created + in_progress + added + arguments delta), got %d", len(events))
 	}
 
-	// First event should be output_item.added (function_call)
-	if events[0]["type"] != "response.output_item.added" {
-		t.Errorf("expected first event 'response.output_item.added', got %v", events[0]["type"])
+	if events[0]["type"] != "response.created" {
+		t.Errorf("expected first event 'response.created', got %v", events[0]["type"])
 	}
-	item, ok := events[0]["item"].(map[string]any)
+
+	if events[1]["type"] != "response.in_progress" {
+		t.Errorf("expected second event 'response.in_progress', got %v", events[1]["type"])
+	}
+	// Third event should be output_item.added (function_call)
+	if events[2]["type"] != "response.output_item.added" {
+		t.Errorf("expected third event 'response.output_item.added', got %v", events[2]["type"])
+	}
+	item, ok := events[2]["item"].(map[string]any)
 	if !ok {
 		t.Fatal("expected 'item' map in added event")
 	}
@@ -263,17 +451,96 @@ func TestToolCallStart(t *testing.T) {
 	if item["call_id"] != tcID {
 		t.Errorf("expected call_id '%s', got %v", tcID, item["call_id"])
 	}
+	if item["id"] != "fc_"+tcID {
+		t.Errorf("expected deterministic function item id %q, got %v", "fc_"+tcID, item["id"])
+	}
+	if item["arguments"] != "" {
+		t.Errorf("expected added function_call arguments to start as empty string, got %#v", item["arguments"])
+	}
 	if item["name"] != "get_weather" {
 		t.Errorf("expected name 'get_weather', got %v", item["name"])
 	}
 
-	// Second event should be function_call_arguments.delta
-	if events[1]["type"] != "response.function_call_arguments.delta" {
-		t.Errorf("expected second event 'response.function_call_arguments.delta', got %v", events[1]["type"])
+	// Fourth event should be function_call_arguments.delta
+	if events[3]["type"] != "response.function_call_arguments.delta" {
+		t.Errorf("expected fourth event 'response.function_call_arguments.delta', got %v", events[3]["type"])
 	}
-	if events[1]["delta"] != `{"city":"NYC"}` {
-		t.Errorf("expected delta '{\"city\":\"NYC\"}', got %v", events[1]["delta"])
+	if events[3]["delta"] != `{"city":"NYC"}` {
+		t.Errorf("expected delta '{\"city\":\"NYC\"}', got %v", events[3]["delta"])
 	}
+}
+
+func TestStreamFunctionCallCompletionKeepsArgumentsAsString(t *testing.T) {
+	st := &StreamTransformState{}
+	tcIndex := 0
+	tcID := "call_abc123"
+	startChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "get_weather",
+								Arguments: `{"city":"NYC"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = st.ProcessChatSSEChunk(startChunk)
+
+	finishReason := "tool_calls"
+	finishEvents := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, FinishReason: &finishReason},
+		},
+	})
+
+	var doneItem map[string]any
+	for _, e := range finishEvents {
+		if e["type"] == "response.output_item.done" {
+			item, _ := e["item"].(map[string]any)
+			if item != nil && item["type"] == "function_call" {
+				doneItem = item
+				break
+			}
+		}
+	}
+	if doneItem == nil {
+		t.Fatal("expected function_call output_item.done event")
+	}
+	if doneItem["arguments"] != `{"city":"NYC"}` {
+		t.Fatalf("expected completed function_call arguments string, got %#v", doneItem["arguments"])
+	}
+
+	finalEvents := st.Finalize()
+	for _, e := range finalEvents {
+		if e["type"] != "response.completed" {
+			continue
+		}
+		resp := e["response"].(map[string]any)
+		output := resp["output"].([]any)
+		for _, itemAny := range output {
+			item := itemAny.(map[string]any)
+			if item["type"] != "function_call" {
+				continue
+			}
+			if item["arguments"] != `{"city":"NYC"}` {
+				t.Fatalf("expected response.completed function_call arguments string, got %#v", item["arguments"])
+			}
+			return
+		}
+	}
+	t.Fatal("expected response.completed with function_call output item")
 }
 
 func TestToolCallContinuation(t *testing.T) {
@@ -396,6 +663,9 @@ func TestCompletedEvent(t *testing.T) {
 	}
 	if resp["id"] != "chatcmpl-1" {
 		t.Errorf("expected id 'chatcmpl-1', got %v", resp["id"])
+	}
+	if _, ok := resp["output"].([]any); !ok {
+		t.Fatalf("expected completed response to include output array, got %T", resp["output"])
 	}
 }
 
@@ -526,12 +796,25 @@ func TestUsageInCompletedEvent(t *testing.T) {
 		t.Fatal("expected 'response' map in completed event")
 	}
 
-	usage, ok := resp["usage"].(*dto.Usage)
+	usage, ok := resp["usage"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected usage to be *dto.Usage, got %T", resp["usage"])
+		t.Fatalf("expected usage to be map[string]any, got %T", resp["usage"])
 	}
-	if usage.TotalTokens != 15 {
-		t.Errorf("expected total_tokens=15 in completed usage, got %d", usage.TotalTokens)
+	if usage["input_tokens"] != 10 {
+		t.Fatalf("expected input_tokens=10, got %#v", usage["input_tokens"])
+	}
+	if usage["output_tokens"] != 5 {
+		t.Fatalf("expected output_tokens=5, got %#v", usage["output_tokens"])
+	}
+	if usage["total_tokens"] != 15 {
+		t.Fatalf("expected total_tokens=15, got %#v", usage["total_tokens"])
+	}
+	details, ok := usage["output_tokens_details"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected output_tokens_details map, got %T", usage["output_tokens_details"])
+	}
+	if details["reasoning_tokens"] != 0 {
+		t.Fatalf("expected reasoning_tokens=0, got %#v", details["reasoning_tokens"])
 	}
 }
 
@@ -899,6 +1182,14 @@ func TestWriteResponsesSSEEvent_ProducesValidJSON(t *testing.T) {
 	if parsed["type"] != "response.output_text.delta" {
 		t.Errorf("expected type in JSON, got %v", parsed["type"])
 	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: response.output_text.delta\n") {
+		t.Fatalf("expected SSE event line, got %q", body)
+	}
+	if !strings.Contains(body, "data: ") {
+		t.Fatalf("expected SSE data line, got %q", body)
+	}
 }
 
 func TestWriteResponsesSSEEvent_ComplexEvent(t *testing.T) {
@@ -971,6 +1262,16 @@ func TestFullStreamSimulation(t *testing.T) {
 	if len(events) < 2 {
 		t.Fatalf("step 1: expected >= 2 events, got %d", len(events))
 	}
+	hasInProgress := false
+	for _, e := range events {
+		if e["type"] == "response.in_progress" {
+			hasInProgress = true
+			break
+		}
+	}
+	if !hasInProgress {
+		t.Fatal("expected response.in_progress event on first chunk")
+	}
 
 	// 2. Second text chunk (delta only)
 	c2 := " world"
@@ -1031,6 +1332,55 @@ func TestFullStreamSimulation(t *testing.T) {
 		t.Error("expected LatestUsage to be set")
 	} else if st.LatestUsage.TotalTokens != 7 {
 		t.Errorf("expected total_tokens=7, got %d", st.LatestUsage.TotalTokens)
+	}
+}
+
+func TestReasoningFinalizeEmitsDoneEvents(t *testing.T) {
+	st := &StreamTransformState{}
+	reasoning := "Need to think."
+	stop := "stop"
+
+	startEvents := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ReasoningContent: &reasoning,
+				},
+			},
+		},
+	})
+	if len(startEvents) == 0 {
+		t.Fatal("expected reasoning start events")
+	}
+
+	finalEvents := st.ProcessChatSSEChunk(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, FinishReason: &stop},
+		},
+	})
+
+	hasReasoningDone := false
+	hasReasoningItemDone := false
+	for _, e := range finalEvents {
+		switch e["type"] {
+		case "response.reasoning_summary_text.done":
+			hasReasoningDone = true
+		case "response.output_item.done":
+			item, _ := e["item"].(map[string]any)
+			if item != nil && item["type"] == "reasoning" {
+				hasReasoningItemDone = true
+			}
+		}
+	}
+	if !hasReasoningDone {
+		t.Fatal("expected response.reasoning_summary_text.done event")
+	}
+	if !hasReasoningItemDone {
+		t.Fatal("expected response.output_item.done for reasoning item")
 	}
 }
 
@@ -1139,8 +1489,12 @@ func TestToolCallNoArgumentsOnFirstChunk(t *testing.T) {
 
 func TestStreamToolCallRestoresCustomToolItemType(t *testing.T) {
 	toolCtx := &ChatToolContext{
-		chatNameToResponseType: map[string]string{
-			"custom_my_tool": "custom_tool_call",
+		chatNameToSpec: map[string]ChatToolSpec{
+			"my_tool": {
+				Kind:     ChatToolKindCustom,
+				Name:     "my_tool",
+				ChatName: "my_tool",
+			},
 		},
 	}
 
@@ -1163,8 +1517,8 @@ func TestStreamToolCallRestoresCustomToolItemType(t *testing.T) {
 							Index: &tcIndex,
 							ID:    tcID,
 							Function: dto.FunctionResponse{
-								Name:      "custom_my_tool",
-								Arguments: `{}`,
+								Name:      "my_tool",
+								Arguments: `{"input":"scan the repo"}`,
 							},
 						},
 					},
@@ -1191,9 +1545,297 @@ func TestStreamToolCallRestoresCustomToolItemType(t *testing.T) {
 	if addedItem["type"] != "custom_tool_call" {
 		t.Errorf("expected item type 'custom_tool_call', got %v", addedItem["type"])
 	}
-	if addedItem["name"] != "custom_my_tool" {
-		t.Errorf("expected name 'custom_my_tool', got %v", addedItem["name"])
+	if addedItem["id"] != "ctc_"+tcID {
+		t.Errorf("expected deterministic custom tool id %q, got %v", "ctc_"+tcID, addedItem["id"])
 	}
+	if addedItem["name"] != "my_tool" {
+		t.Errorf("expected name 'my_tool', got %v", addedItem["name"])
+	}
+}
+
+func TestStreamCustomToolFinalizesWithInputEvents(t *testing.T) {
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"my_tool": {
+				Kind:     ChatToolKindCustom,
+				Name:     "my_tool",
+				ChatName: "my_tool",
+			},
+		},
+	}
+
+	st := &StreamTransformState{ToolCtx: toolCtx}
+	tcIndex := 0
+	tcID := "call_custom_2"
+
+	startChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-custom",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "my_tool",
+								Arguments: `{"input":"scan the repo"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	st.ProcessChatSSEChunk(startChunk)
+
+	finishReason := "tool_calls"
+	finishChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-custom",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index:        0,
+				FinishReason: &finishReason,
+			},
+		},
+	}
+
+	events := st.ProcessChatSSEChunk(finishChunk)
+	hasInputDelta := false
+	hasInputDone := false
+	for _, e := range events {
+		switch e["type"] {
+		case "response.custom_tool_call_input.delta":
+			hasInputDelta = e["delta"] == "scan the repo"
+		case "response.custom_tool_call_input.done":
+			hasInputDone = e["input"] == "scan the repo"
+		case "response.function_call_arguments.done":
+			t.Fatal("did not expect generic function_call_arguments.done for custom tool")
+		}
+	}
+	if !hasInputDelta {
+		t.Fatal("expected response.custom_tool_call_input.delta event")
+	}
+	if !hasInputDone {
+		t.Fatal("expected response.custom_tool_call_input.done event")
+	}
+}
+
+func TestStreamToolCallRestoresNamespaceMetadata(t *testing.T) {
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"mcp__codex_apps__gmail__search_threads": {
+				Kind:      ChatToolKindNamespace,
+				Name:      "search_threads",
+				Namespace: "mcp__codex_apps__gmail",
+				ChatName:  "mcp__codex_apps__gmail__search_threads",
+			},
+		},
+	}
+
+	st := &StreamTransformState{ToolCtx: toolCtx}
+	tcIndex := 0
+	tcID := "call_ns_1"
+	startChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-ns",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "mcp__codex_apps__gmail__search_threads",
+								Arguments: `{"query":"inbox"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	startEvents := st.ProcessChatSSEChunk(startChunk)
+	var addedItem map[string]any
+	for _, e := range startEvents {
+		if e["type"] == "response.output_item.added" {
+			addedItem = e["item"].(map[string]any)
+			break
+		}
+	}
+	if addedItem == nil {
+		t.Fatal("expected output_item.added event")
+	}
+	if addedItem["name"] != "search_threads" {
+		t.Fatalf("expected restored name, got %v", addedItem["name"])
+	}
+	if addedItem["namespace"] != "mcp__codex_apps__gmail" {
+		t.Fatalf("expected restored namespace, got %v", addedItem["namespace"])
+	}
+
+	finishReason := "tool_calls"
+	finishChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-ns",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index:        0,
+				FinishReason: &finishReason,
+			},
+		},
+	}
+
+	finishEvents := st.ProcessChatSSEChunk(finishChunk)
+	for _, e := range finishEvents {
+		if e["type"] != "response.output_item.done" {
+			continue
+		}
+		item := e["item"].(map[string]any)
+		if item["namespace"] != "mcp__codex_apps__gmail" {
+			t.Fatalf("expected restored namespace on done item, got %v", item["namespace"])
+		}
+		if item["name"] != "search_threads" {
+			t.Fatalf("expected restored name on done item, got %v", item["name"])
+		}
+		return
+	}
+	t.Fatal("expected response.output_item.done event")
+}
+
+func TestStreamToolCallRestoresToolSearchType(t *testing.T) {
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"tool_search": {
+				Kind:     ChatToolKindToolSearch,
+				Name:     "tool_search",
+				ChatName: "tool_search",
+			},
+		},
+	}
+
+	st := &StreamTransformState{ToolCtx: toolCtx}
+	tcIndex := 0
+	tcID := "call_tool_search_1"
+	startChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-tool-search",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "tool_search",
+								Arguments: `{"query":"gmail search emails","limit":10}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	startEvents := st.ProcessChatSSEChunk(startChunk)
+	var addedItem map[string]any
+	for _, e := range startEvents {
+		if e["type"] == "response.output_item.added" {
+			addedItem = e["item"].(map[string]any)
+			break
+		}
+	}
+	if addedItem == nil {
+		t.Fatal("expected output_item.added event")
+	}
+	if addedItem["type"] != "tool_search_call" {
+		t.Fatalf("expected tool_search_call item type, got %v", addedItem["type"])
+	}
+	if addedItem["execution"] != "client" {
+		t.Fatalf("expected tool_search_call execution=client, got %v", addedItem["execution"])
+	}
+}
+
+func TestStreamToolSearchCallCoercesStringArgumentsToObject(t *testing.T) {
+	toolCtx := &ChatToolContext{
+		chatNameToSpec: map[string]ChatToolSpec{
+			"tool_search": {
+				Kind:     ChatToolKindToolSearch,
+				Name:     "tool_search",
+				ChatName: "tool_search",
+			},
+		},
+	}
+
+	st := &StreamTransformState{ToolCtx: toolCtx}
+	tcIndex := 0
+	tcID := "call_tool_search_raw"
+	chunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-tool-search-raw",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							Index: &tcIndex,
+							ID:    tcID,
+							Function: dto.FunctionResponse{
+								Name:      "tool_search",
+								Arguments: `gmail threads`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	st.ProcessChatSSEChunk(chunk)
+
+	finishReason := "tool_calls"
+	finishChunk := &dto.ChatCompletionsStreamResponse{
+		Id:      "chatcmpl-tool-search-raw",
+		Model:   "gpt-4o",
+		Created: 12345,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index:        0,
+				FinishReason: &finishReason,
+			},
+		},
+	}
+
+	events := st.ProcessChatSSEChunk(finishChunk)
+	for _, e := range events {
+		if e["type"] != "response.output_item.done" {
+			continue
+		}
+		item := e["item"].(map[string]any)
+		args, ok := item["arguments"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected tool_search_call arguments object, got %#v", item["arguments"])
+		}
+		if args["query"] != "gmail threads" {
+			t.Fatalf("expected string arguments to be coerced into query object, got %#v", args)
+		}
+		return
+	}
+	t.Fatal("expected response.output_item.done event")
 }
 
 func TestStreamToolCallWithoutCtxDefaultsToFunctionCall(t *testing.T) {
@@ -1311,12 +1953,12 @@ func TestStreamFinalizeUsesTrailingUsageChunk(t *testing.T) {
 	if !ok {
 		t.Fatal("expected 'response' map in completed event")
 	}
-	usage, ok := resp["usage"].(*dto.Usage)
+	usage, ok := resp["usage"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected usage to be *dto.Usage, got %T", resp["usage"])
+		t.Fatalf("expected usage to be map[string]any, got %T", resp["usage"])
 	}
-	if usage.TotalTokens != 12 {
-		t.Errorf("expected total_tokens=12 in finalized usage, got %d", usage.TotalTokens)
+	if usage["total_tokens"] != 12 {
+		t.Errorf("expected total_tokens=12 in finalized usage, got %#v", usage["total_tokens"])
 	}
 }
 

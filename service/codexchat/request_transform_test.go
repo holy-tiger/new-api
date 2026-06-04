@@ -96,6 +96,105 @@ func TestInstructionsToSystemMessage(t *testing.T) {
 	}
 }
 
+func TestSystemMessagesCollapseToHeadAndRolesNormalize(t *testing.T) {
+	instructionsRaw := mustMarshal(t, "You are Codex.")
+	inputItems := []map[string]any{
+		{
+			"type":    "message",
+			"role":    "developer",
+			"content": "Follow project instructions.",
+		},
+		{
+			"type":    "message",
+			"role":    "user",
+			"content": "Inspect the repo.",
+		},
+		{
+			"type":    "message",
+			"role":    "system",
+			"content": "Collaboration Mode: Default",
+		},
+		{
+			"type":    "message",
+			"role":    "latest_reminder",
+			"content": "Newest user request wins.",
+		},
+	}
+
+	req := &dto.OpenAIResponsesRequest{
+		Model:        "gpt-4o",
+		Input:        mustMarshal(t, inputItems),
+		Instructions: instructionsRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages after collapsing system messages, got %d: %#v", len(chatReq.Messages), chatReq.Messages)
+	}
+	if chatReq.Messages[0].Role != "system" {
+		t.Fatalf("expected first message to be system, got %q", chatReq.Messages[0].Role)
+	}
+	systemContent, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected system content to be string, got %T", chatReq.Messages[0].Content)
+	}
+	for _, expected := range []string{"You are Codex.", "Follow project instructions.", "Collaboration Mode: Default"} {
+		if !strings.Contains(systemContent, expected) {
+			t.Fatalf("expected collapsed system content to contain %q, got %q", expected, systemContent)
+		}
+	}
+	for i, msg := range chatReq.Messages[1:] {
+		if msg.Role == "system" {
+			t.Fatalf("expected no system message after index 0, got system at index %d", i+1)
+		}
+	}
+	if chatReq.Messages[1].Role != "user" || chatReq.Messages[1].Content != "Inspect the repo." {
+		t.Fatalf("expected original user message at index 1, got %#v", chatReq.Messages[1])
+	}
+	if chatReq.Messages[2].Role != "user" || chatReq.Messages[2].Content != "Newest user request wins." {
+		t.Fatalf("expected latest_reminder to normalize to user at index 2, got %#v", chatReq.Messages[2])
+	}
+}
+
+func TestReviewPromptAddsCodexReviewFormattingGuidance(t *testing.T) {
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: mustMarshal(t, []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "帮我 review 最近 2 天修改的代码",
+			},
+		}),
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected system guidance plus user message, got %#v", chatReq.Messages)
+	}
+	if chatReq.Messages[0].Role != "system" {
+		t.Fatalf("expected review guidance to be a system message, got %#v", chatReq.Messages[0])
+	}
+	systemContent, ok := chatReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("expected system content string, got %T", chatReq.Messages[0].Content)
+	}
+	for _, expected := range []string{"Codex code review format", "Findings", "Do not include Scope", "End with a concise completion sentence"} {
+		if !strings.Contains(systemContent, expected) {
+			t.Fatalf("expected review guidance to contain %q, got %q", expected, systemContent)
+		}
+	}
+	if chatReq.Messages[1].Role != "user" || chatReq.Messages[1].Content != "帮我 review 最近 2 天修改的代码" {
+		t.Fatalf("expected original user review prompt at index 1, got %#v", chatReq.Messages[1])
+	}
+}
+
 // =============================================================================
 // 3. Message item → correct role
 // =============================================================================
@@ -183,6 +282,309 @@ func TestFunctionCallToToolCalls(t *testing.T) {
 	}
 }
 
+func TestFunctionCallCarriesReasoningContent(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":              "function_call",
+			"call_id":           "call_reasoning_1",
+			"name":              "get_weather",
+			"arguments":         `{"city":"Boston"}`,
+			"reasoning_content": "Need weather data before answering.",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].ReasoningContent != "Need weather data before answering." {
+		t.Fatalf("expected reasoning_content to round-trip, got %q", chatReq.Messages[0].ReasoningContent)
+	}
+}
+
+func TestReasoningItemAttachesToFollowingFunctionCall(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type": "reasoning",
+			"text": "Need weather data before answering.",
+		},
+		{
+			"type":      "function_call",
+			"call_id":   "call_reasoning_2",
+			"name":      "get_weather",
+			"arguments": `{"city":"Boston"}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 assistant tool_call message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Fatalf("expected assistant role, got %q", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[0].ReasoningContent != "Need weather data before answering." {
+		t.Fatalf("expected reasoning_content to attach to tool call message, got %q", chatReq.Messages[0].ReasoningContent)
+	}
+	if len(chatReq.Messages[0].ToolCalls) == 0 {
+		t.Fatal("expected tool_calls on assistant message")
+	}
+}
+
+func TestTrailingReasoningAttachesToPreviousFunctionCall(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_reasoning_3",
+			"name":      "get_weather",
+			"arguments": `{"city":"Boston"}`,
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_reasoning_3",
+			"output":  "sunny, 72F",
+		},
+		{
+			"type":    "reasoning",
+			"summary": "Need weather data before answering.",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Fatalf("expected first message role assistant, got %q", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[0].ReasoningContent != "Need weather data before answering." {
+		t.Fatalf("expected trailing reasoning to backfill assistant tool call, got %q", chatReq.Messages[0].ReasoningContent)
+	}
+	if chatReq.Messages[1].Role != "tool" {
+		t.Fatalf("expected second message role tool, got %q", chatReq.Messages[1].Role)
+	}
+}
+
+func TestFunctionCallGetsPlaceholderReasoningContent(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_reasoning_4",
+			"name":      "get_weather",
+			"arguments": `{"city":"Boston"}`,
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "deepseek-reasoner",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Fatalf("expected assistant role, got %q", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[0].ReasoningContent != "tool call" {
+		t.Fatalf("expected placeholder reasoning_content, got %q", chatReq.Messages[0].ReasoningContent)
+	}
+}
+
+func TestAdjacentFunctionCallsGroupedBeforeToolOutputs(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_group_1",
+			"name":      "get_weather",
+			"arguments": `{"city":"Boston"}`,
+		},
+		{
+			"type":      "function_call",
+			"call_id":   "call_group_2",
+			"name":      "get_time",
+			"arguments": `{"timezone":"Asia/Shanghai"}`,
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_group_1",
+			"output":  "sunny, 72F",
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_group_2",
+			"output":  "08:00",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" {
+		t.Fatalf("expected first message role assistant, got %q", chatReq.Messages[0].Role)
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal ToolCalls: %v", err)
+	}
+	if len(tcs) != 2 {
+		t.Fatalf("expected 2 grouped tool calls, got %d", len(tcs))
+	}
+	if tcs[0].ID != "call_group_1" || tcs[1].ID != "call_group_2" {
+		t.Fatalf("unexpected tool call order: %#v", tcs)
+	}
+	if chatReq.Messages[1].Role != "tool" || chatReq.Messages[1].ToolCallId != "call_group_1" {
+		t.Fatalf("expected tool output for call_group_1 at index 1, got %#v", chatReq.Messages[1])
+	}
+	if chatReq.Messages[2].Role != "tool" || chatReq.Messages[2].ToolCallId != "call_group_2" {
+		t.Fatalf("expected tool output for call_group_2 at index 2, got %#v", chatReq.Messages[2])
+	}
+}
+
+func TestAssistantMessageBetweenFunctionCallAndOutputMovesBeforeToolCall(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_interleaved",
+			"name":      "read_file",
+			"arguments": `{"path":"README.md"}`,
+		},
+		{
+			"type":    "message",
+			"role":    "assistant",
+			"content": "I need to read the relevant files.",
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_interleaved",
+			"output":  "file content",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "assistant" || chatReq.Messages[0].Content != "I need to read the relevant files." {
+		t.Fatalf("expected assistant text before tool_calls, got %#v", chatReq.Messages[0])
+	}
+	if chatReq.Messages[1].Role != "assistant" || len(chatReq.Messages[1].ToolCalls) == 0 {
+		t.Fatalf("expected assistant tool_calls at index 1, got %#v", chatReq.Messages[1])
+	}
+	if chatReq.Messages[2].Role != "tool" || chatReq.Messages[2].ToolCallId != "call_interleaved" {
+		t.Fatalf("expected tool output immediately after tool_calls, got %#v", chatReq.Messages[2])
+	}
+}
+
+func TestMessageBetweenToolOutputsMovesAfterToolOutputGroup(t *testing.T) {
+	inputItems := []map[string]any{
+		{
+			"type":      "function_call",
+			"call_id":   "call_group_1",
+			"name":      "read_file",
+			"arguments": `{"path":"README.md"}`,
+		},
+		{
+			"type":      "function_call",
+			"call_id":   "call_group_2",
+			"name":      "search",
+			"arguments": `{"q":"responses"}`,
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_group_1",
+			"output":  "file content",
+		},
+		{
+			"role":    "system",
+			"content": "latest reminder",
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call_group_2",
+			"output":  "search output",
+		},
+	}
+	inputRaw := mustMarshal(t, inputItems)
+
+	req := &dto.OpenAIResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputRaw,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chatReq.Messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "system" || chatReq.Messages[0].Content != "latest reminder" {
+		t.Fatalf("expected interleaved system message to collapse to head, got %#v", chatReq.Messages[0])
+	}
+	if chatReq.Messages[1].Role != "assistant" || len(chatReq.Messages[1].ToolCalls) == 0 {
+		t.Fatalf("expected assistant tool_calls at index 1, got %#v", chatReq.Messages[1])
+	}
+	if chatReq.Messages[2].Role != "tool" || chatReq.Messages[2].ToolCallId != "call_group_1" {
+		t.Fatalf("expected first tool output at index 2, got %#v", chatReq.Messages[2])
+	}
+	if chatReq.Messages[3].Role != "tool" || chatReq.Messages[3].ToolCallId != "call_group_2" {
+		t.Fatalf("expected second tool output at index 3, got %#v", chatReq.Messages[3])
+	}
+}
+
 // =============================================================================
 // 5. Function call output → tool message
 // =============================================================================
@@ -229,7 +631,7 @@ func TestFunctionCallOutputToToolMessage(t *testing.T) {
 // 6. Custom tool call → prefixed name
 // =============================================================================
 
-func TestCustomToolCallPrefixedName(t *testing.T) {
+func TestCustomToolCallKeepsOriginalName(t *testing.T) {
 	inputItems := []map[string]any{
 		{
 			"type":      "custom_tool_call",
@@ -260,8 +662,8 @@ func TestCustomToolCallPrefixedName(t *testing.T) {
 	if len(tcs) != 1 {
 		t.Fatalf("expected 1 ToolCall, got %d", len(tcs))
 	}
-	if tcs[0].Function.Name != "custom_my_tool" {
-		t.Errorf("expected name 'custom_my_tool', got %q", tcs[0].Function.Name)
+	if tcs[0].Function.Name != "my_tool" {
+		t.Errorf("expected name 'my_tool', got %q", tcs[0].Function.Name)
 	}
 }
 
@@ -522,9 +924,9 @@ func TestToolsMapping(t *testing.T) {
 		t.Errorf("tool[0]: expected description, got %q", chatReq.Tools[0].Function.Description)
 	}
 
-	// Second tool: custom type → name prefixed with "custom_"
-	if chatReq.Tools[1].Function.Name != "custom_my_custom_tool" {
-		t.Errorf("tool[1]: expected name 'custom_my_custom_tool', got %q", chatReq.Tools[1].Function.Name)
+	// Second tool: custom type keeps the original name and exposes an input envelope schema.
+	if chatReq.Tools[1].Function.Name != "my_custom_tool" {
+		t.Errorf("tool[1]: expected name 'my_custom_tool', got %q", chatReq.Tools[1].Function.Name)
 	}
 }
 
@@ -1198,6 +1600,26 @@ func TestStreamOptionsMapping(t *testing.T) {
 	}
 }
 
+func TestStreamingRequestInjectsIncludeUsageStreamOption(t *testing.T) {
+	stream := true
+	req := &dto.OpenAIResponsesRequest{
+		Model:  "gpt-4o",
+		Input:  mustMarshal(t, "Hello"),
+		Stream: &stream,
+	}
+
+	chatReq, _, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chatReq.StreamOptions == nil {
+		t.Fatal("expected StreamOptions to be injected for streaming request")
+	}
+	if !chatReq.StreamOptions.IncludeUsage {
+		t.Fatal("expected injected StreamOptions.IncludeUsage=true")
+	}
+}
+
 // TestMetadataMapping tests metadata mapping.
 func TestMetadataMapping(t *testing.T) {
 	metaRaw := mustMarshal(t, map[string]string{"key": "value"})
@@ -1347,6 +1769,101 @@ func TestToolSearchCallWithArguments(t *testing.T) {
 	}
 	if tcs[0].Function.Name != "tool_search" {
 		t.Errorf("expected name 'tool_search', got %q", tcs[0].Function.Name)
+	}
+}
+
+func TestCustomToolCallUsesInputArgumentEnvelope(t *testing.T) {
+	inputRaw := mustMarshal(t, []map[string]any{
+		{
+			"type":    "custom_tool_call",
+			"call_id": "call_custom_1",
+			"name":    "my_tool",
+			"input":   "scan the repo",
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{Model: "gpt-4o", Input: inputRaw}
+	chatReq, toolCtx, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal tool calls: %v", err)
+	}
+
+	if tcs[0].Function.Name != "my_tool" {
+		t.Fatalf("expected chat tool name my_tool, got %q", tcs[0].Function.Name)
+	}
+	if tcs[0].Function.Arguments != `{"input":"scan the repo"}` {
+		t.Fatalf("expected custom tool input envelope, got %q", tcs[0].Function.Arguments)
+	}
+	if !toolCtx.IsCustomTool("my_tool") {
+		t.Fatal("expected tool context to classify my_tool as custom")
+	}
+}
+
+func TestToolSearchCallUsesProxyFunctionName(t *testing.T) {
+	inputRaw := mustMarshal(t, []map[string]any{
+		{
+			"type":      "tool_search_call",
+			"call_id":   "call_tool_search_1",
+			"arguments": map[string]any{"query": "gmail search emails", "limit": 10},
+		},
+	})
+
+	req := &dto.OpenAIResponsesRequest{Model: "gpt-4o", Input: inputRaw}
+	chatReq, toolCtx, err := ResponsesRequestToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tcs []dto.ToolCallResponse
+	if err := common.Unmarshal(chatReq.Messages[0].ToolCalls, &tcs); err != nil {
+		t.Fatalf("failed to unmarshal tool calls: %v", err)
+	}
+
+	if tcs[0].Function.Name != "tool_search" {
+		t.Fatalf("expected proxy function name tool_search, got %q", tcs[0].Function.Name)
+	}
+	if toolCtx.RestoreToolType("tool_search", "function_call") != "tool_search_call" {
+		t.Fatal("expected tool_search to restore as tool_search_call")
+	}
+}
+
+func TestNamespaceToolChoiceMapsToFlattenedChatName(t *testing.T) {
+	toolsRaw := mustMarshal(t, []map[string]any{
+		{
+			"type":      "function",
+			"name":      "search_threads",
+			"namespace": "mcp__codex_apps__gmail",
+			"parameters": map[string]any{
+				"type": "object",
+			},
+		},
+	})
+	toolChoiceRaw := mustMarshal(t, map[string]any{
+		"type":      "function",
+		"name":      "search_threads",
+		"namespace": "mcp__codex_apps__gmail",
+	})
+
+	tools, toolChoice, toolCtx, err := buildChatTools(toolsRaw, toolChoiceRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tools[0].Function.Name != "mcp__codex_apps__gmail__search_threads" {
+		t.Fatalf("expected flattened namespace chat name, got %q", tools[0].Function.Name)
+	}
+	tcMap := toolChoice.(map[string]any)
+	fn := tcMap["function"].(map[string]any)
+	if fn["name"] != "mcp__codex_apps__gmail__search_threads" {
+		t.Fatalf("expected flattened tool choice name, got %v", fn["name"])
+	}
+	if toolCtx.RestoreToolType("mcp__codex_apps__gmail__search_threads", "function_call") != "function_call" {
+		t.Fatal("expected namespace tool to restore as function_call")
 	}
 }
 
@@ -1669,10 +2186,8 @@ func TestToolChoiceCustomToolMapsToNestedChatSelector(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected nested function object, got %T", tc["function"])
 	}
-	// The custom tool name is prefixed to "custom_my_tool" in the Chat tools list,
-	// so tool_choice must reference the same prefixed name.
-	if fn["name"] != "custom_my_tool" {
-		t.Fatalf("expected nested function name custom_my_tool, got %v", fn["name"])
+	if fn["name"] != "my_tool" {
+		t.Fatalf("expected nested function name my_tool, got %v", fn["name"])
 	}
 }
 
@@ -1794,8 +2309,8 @@ func TestBuildChatToolsReturnsToolContext(t *testing.T) {
 	if ctx.responseNameToChatName["get_weather"] != "get_weather" {
 		t.Errorf("expected get_weather -> get_weather, got %s", ctx.responseNameToChatName["get_weather"])
 	}
-	if ctx.responseNameToChatName["my_tool"] != "custom_my_tool" {
-		t.Errorf("expected my_tool -> custom_my_tool, got %s", ctx.responseNameToChatName["my_tool"])
+	if ctx.responseNameToChatName["my_tool"] != "my_tool" {
+		t.Errorf("expected my_tool -> my_tool, got %s", ctx.responseNameToChatName["my_tool"])
 	}
 	if ctx.responseNameToChatName["files"] != "file_search_files" {
 		t.Errorf("expected files -> file_search_files, got %s", ctx.responseNameToChatName["files"])
@@ -1818,7 +2333,7 @@ func TestToolContextTracksAllPrefixedTypes(t *testing.T) {
 		{"code_interpreter", "ci", "code_interpreter_ci"},
 		{"local_shell", "ls", "local_shell_ls"},
 		{"image_generation", "ig", "image_generation_ig"},
-		{"custom", "ct", "custom_ct"},
+		{"custom", "ct", "ct"},
 		{"function", "fn", "fn"},
 	} {
 		t.Run(tc.toolType, func(t *testing.T) {
@@ -2611,8 +3126,8 @@ func TestHistoryRecoveryPreservesUserMessageOrder(t *testing.T) {
 	// 6: function_call_output call_b
 
 	expectedOrder := []struct {
-		key    string
-		val    string
+		key      string
+		val      string
 		itemType string
 	}{
 		{"role", "user", ""},

@@ -1,6 +1,9 @@
 package openaicompat
 
-import "github.com/QuantumNous/new-api/setting/model_setting"
+import (
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/setting/model_setting"
+)
 
 func ShouldChatCompletionsUseResponsesPolicy(policy model_setting.ChatCompletionsToResponsesPolicy, channelID int, channelType int, model string) bool {
 	if !policy.IsChannelEnabled(channelID, channelType) {
@@ -20,6 +23,9 @@ func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, mod
 
 // ShouldResponsesUseChatCompletionsPolicy returns true if the channel is enabled and the model matches the bridge policy patterns
 func ShouldResponsesUseChatCompletionsPolicy(policy model_setting.ResponsesToChatCompletionsPolicy, channelID int, channelType int, model string) bool {
+	if channelType == constant.ChannelTypeDeepSeek {
+		return true
+	}
 	if !policy.IsChannelEnabled(channelID, channelType) {
 		return false
 	}

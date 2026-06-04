@@ -87,8 +87,20 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err := applyDeepSeekV4OpenAIThinkingSuffix(info, request); err != nil {
 		return nil, err
 	}
+	normalizeDeepSeekOpenAIRoles(request)
 
 	return request, nil
+}
+
+func normalizeDeepSeekOpenAIRoles(request *dto.GeneralOpenAIRequest) {
+	if request == nil {
+		return
+	}
+	for i := range request.Messages {
+		if request.Messages[i].Role == "developer" {
+			request.Messages[i].Role = "system"
+		}
+	}
 }
 
 func applyDeepSeekV4OpenAIThinkingSuffix(info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) error {
