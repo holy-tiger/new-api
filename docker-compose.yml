@@ -15,7 +15,7 @@
 
 services:
   new-api:
-    image: new-api:release
+    image: new-api:release20260705
     container_name: new-api
     restart: always
     command: --log-dir /app/logs
