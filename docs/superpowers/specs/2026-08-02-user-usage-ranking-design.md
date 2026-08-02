@@ -2,7 +2,7 @@
 
 ## 目标
 
-新增一个管理员专用的“用户使用量排行”页面，按选定时间范围统计每个用户的累计 Token 使用量、计费金额和调用次数。页面使用服务端聚合、排序和分页，避免复用数据看板的全量明细接口后在浏览器内计算。
+新增一个管理员专用的“用户使用量排行”页面，按选定时间范围统计每个有效用户的累计 Token 使用量、计费金额和调用次数。页面使用服务端聚合、排序和分页，避免复用数据看板的全量明细接口后在浏览器内计算。选定时间范围内没有使用量的启用用户也进入排行，三个用量字段显示为 0；禁用或已软删除的用户不进入排行。
 
 页面提供所有匹配用户的完整排行，不把结果硬限制为 100 人。选择每页 100 条时，第一页即为当前排序下的 Top 100。
 
@@ -14,6 +14,8 @@
 - 新增管理员页面、路由和侧边栏入口。
 - 支持时间范围、远程排序和分页。
 - 按用户 ID 聚合，并显示当前用户名和显示名称。
+- 包含所有启用且未软删除的普通用户、管理员和 Root；所选范围内没有使用量时补 0。
+- 排除禁用和已软删除的用户，即使他们在所选范围内存在历史用量记录。
 - 增加所需的前端国际化文案。
 
 本次不包含：
@@ -90,14 +92,14 @@ GET /api/data/user-ranking
 }
 ```
 
-没有匹配数据时返回空 `items` 和 `total: 0`，不是错误。参数错误返回明确消息；数据库错误使用项目现有的 `common.ApiError` 路径。
+没有符合条件的启用用户时返回空 `items` 和 `total: 0`，不是错误。只要存在符合条件的启用用户，即使所有人的用量都是 0，也返回这些用户。参数错误返回明确消息；数据库错误使用项目现有的 `common.ApiError` 路径。
 
 ## 后端数据访问设计
 
 在 `model/usedata.go` 增加专用查询函数和结果 DTO。查询分为两个逻辑阶段：
 
 1. 在时间范围内按 `quota_data.user_id` 聚合 Token、计费额度和调用次数。
-2. 将聚合结果关联 `users` 表，取得当前 `username` 和 `display_name`，然后排序和分页。
+2. 从启用且未软删除的 `users` 表出发，左连接聚合结果；缺少聚合记录的字段补 0，然后排序和分页。
 
 结果 DTO 中的 `token_used`、`quota`、`count` 和总数使用 `int64`，避免长时间范围或高用量场景下累计值溢出。分页页码和每页数量继续使用 `int`。
 
@@ -105,31 +107,33 @@ GET /api/data/user-ranking
 
 ```sql
 SELECT
-  aggregated.user_id,
-  COALESCE(users.username, aggregated.historical_username) AS username,
+  users.id AS user_id,
+  users.username,
   COALESCE(users.display_name, '') AS display_name,
-  aggregated.token_used,
-  aggregated.quota,
-  aggregated.count
-FROM (
+  COALESCE(aggregated.token_used, 0) AS token_used,
+  COALESCE(aggregated.quota, 0) AS quota,
+  COALESCE(aggregated.count, 0) AS count
+FROM users
+LEFT JOIN (
   SELECT
     user_id,
-    MAX(username) AS historical_username,
     SUM(token_used) AS token_used,
     SUM(quota) AS quota,
     SUM(count) AS count
   FROM quota_data
   WHERE created_at >= ? AND created_at <= ?
   GROUP BY user_id
-) AS aggregated
-LEFT JOIN users ON users.id = aggregated.user_id
-ORDER BY aggregated.token_used DESC, aggregated.user_id ASC
+) AS aggregated ON aggregated.user_id = users.id
+WHERE users.status = 1 AND users.deleted_at IS NULL
+ORDER BY COALESCE(aggregated.token_used, 0) DESC, users.id ASC
 LIMIT ? OFFSET ?
 ```
 
-上例展示默认排序。实际查询根据经过白名单校验的 `sort_by` 和 `sort_order`，在三个聚合字段和两个固定方向中选择排序表达式。总数通过对按 `user_id` 聚合后的子查询执行 `COUNT(*)` 获得。使用 GORM 参数绑定和子查询能力实现；SQL 只使用 SQLite、MySQL 5.7.8+ 和 PostgreSQL 9.6 均支持的 `SUM`、`MAX`、`COALESCE`、`GROUP BY`、`LEFT JOIN`、`LIMIT` 和 `OFFSET`。
+上例展示默认排序。实际查询根据经过白名单校验的 `sort_by` 和 `sort_order`，在三个 `COALESCE` 聚合表达式和两个固定方向中选择排序表达式。总数直接统计 `status = 1` 且 `deleted_at IS NULL` 的用户。使用 GORM 参数绑定和子查询能力实现；SQL 只使用 SQLite、MySQL 5.7.8+ 和 PostgreSQL 9.6 均支持的 `SUM`、`COALESCE`、`GROUP BY`、`LEFT JOIN`、`LIMIT` 和 `OFFSET`。
 
-按 `user_id` 聚合可避免用户改名后被拆成多个排行项。查询直接关联 `users` 表且不附加软删除过滤，因此软删除用户仍显示其用户名和显示名称。用户记录被物理删除时，用户名回退到聚合子查询中按 `MAX(username)` 取得的确定性历史值，显示名称为空。历史用量不能因用户记录删除而从排行总数中消失。
+按 `user_id` 聚合可避免用户改名后被拆成多个排行项。用户表是排行主体，因此用户名和显示名称始终使用当前值。角色不参与过滤：普通用户、管理员和 Root 都进入排行。禁用用户、软删除用户和物理删除用户都不进入排行，他们的历史用量也不会出现在结果或总数中。
+
+聚合子查询不是应用创建的物理临时表。数据库会扫描所选时间范围内的 `quota_data` 并按用户分组，随后与有效用户集合连接。准确的全局排序本来就需要计算范围内各用户的汇总值；与原查询相比，新增成本主要是把零用量有效用户加入排序。在当前规模下无需增加缓存或汇总表，后续数据量显著增长时再评估 `(created_at, user_id)` 复合索引。
 
 ## 前端页面设计
 
@@ -183,11 +187,13 @@ LIMIT ? OFFSET ?
 
 排名随当前排序字段和方向变化，采用顺序排名而不是并列排名。例如两个用户的 Token 使用量相同，仍显示第 4、5 名。升序时第 1 名表示当前排序下数值最小的用户。跨页排名连续。
 
+零用量用户参与相同排序：降序时排在正用量用户之后，升序时排在正用量用户之前；多个零用量用户之间按 `user_id ASC` 稳定排序。
+
 ## 错误处理
 
 - 非管理员请求由认证中间件拒绝。
 - 时间戳无法解析、时间顺序错误、跨度超限、页码无效、分页大小非法或排序参数非法时，不执行数据库查询。
-- 空结果正常显示空状态。
+- 没有任何启用且未软删除用户时正常显示空状态；存在零用量启用用户时显示 0 值排行而不是空状态。
 - `DataExportEnabled` 关闭时，前端显示统计未启用提示，不显示容易误解的普通空结果。
 - 前端重新查询时保留现有结果并显示加载状态；请求失败时展示项目统一错误消息，不使用部分或过期响应覆盖当前筛选条件。
 
@@ -199,9 +205,13 @@ LIMIT ? OFFSET ?
 - `token_used`、`quota`、`count` 的升序和降序均正确。
 - 同一用户跨模型、跨小时的数据正确累计。
 - 用户改名后的历史记录按 `user_id` 合并，并显示当前用户名和显示名称。
+- 所选范围内没有使用量的启用用户以三个 0 值进入排行。
+- 历史上使用过但当前范围没有使用量的启用用户仍以 0 进入排行。
+- 普通用户、管理员和 Root 在启用时都进入排行。
+- 禁用用户和软删除用户不进入排行，即使存在范围内历史用量。
 - 20、50、100 分页、总数和跨页排名基础数据正确。
 - 主排序值相同时按 `user_id ASC` 稳定排序。
-- 空数据正常返回。
+- 没有启用且未软删除用户时正常返回空数据；只有零用量用户时返回 0 值排行。
 - 时间边界、反向时间、一年以上跨度及非法分页和排序参数被拒绝。
 - 普通用户不能访问接口。
 - 查询不使用数据库专属函数或操作符，满足 SQLite、MySQL 和 PostgreSQL 兼容要求。
