@@ -125,6 +125,86 @@ func GetQuotaDataGroupByUser(startTime int64, endTime int64) (quotaData []*Quota
 	return quotaDatas, err
 }
 
+type UserUsageRankingSort string
+type UserUsageRankingOrder string
+
+const (
+	UserUsageRankingSortTokenUsed UserUsageRankingSort = "token_used"
+	UserUsageRankingSortQuota     UserUsageRankingSort = "quota"
+	UserUsageRankingSortCount     UserUsageRankingSort = "count"
+
+	UserUsageRankingOrderAsc  UserUsageRankingOrder = "asc"
+	UserUsageRankingOrderDesc UserUsageRankingOrder = "desc"
+)
+
+type UserUsageRankingQuery struct {
+	StartTime int64
+	EndTime   int64
+	Page      int
+	PageSize  int
+	SortBy    UserUsageRankingSort
+	SortOrder UserUsageRankingOrder
+}
+
+type UserUsageRankingItem struct {
+	UserID      int    `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	TokenUsed   int64  `json:"token_used"`
+	Quota       int64  `json:"quota"`
+	Count       int64  `json:"count"`
+}
+
+func userUsageRankingOrderClause(field UserUsageRankingSort, order UserUsageRankingOrder) (string, error) {
+	columns := map[UserUsageRankingSort]string{
+		UserUsageRankingSortTokenUsed: "COALESCE(aggregated.token_used, 0)",
+		UserUsageRankingSortQuota:     "COALESCE(aggregated.quota, 0)",
+		UserUsageRankingSortCount:     "COALESCE(aggregated.count, 0)",
+	}
+	column, ok := columns[field]
+	if !ok {
+		return "", fmt.Errorf("invalid ranking sort field")
+	}
+	if order == UserUsageRankingOrderAsc {
+		return column + " ASC", nil
+	}
+	if order == UserUsageRankingOrderDesc {
+		return column + " DESC", nil
+	}
+	return "", fmt.Errorf("invalid ranking sort order")
+}
+
+func GetUserUsageRanking(query UserUsageRankingQuery) ([]*UserUsageRankingItem, int64, error) {
+	orderClause, err := userUsageRankingOrderClause(query.SortBy, query.SortOrder)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	aggregate := DB.Table("quota_data").
+		Select("user_id, SUM(token_used) AS token_used, SUM(quota) AS quota, SUM(count) AS count").
+		Where("created_at >= ? AND created_at <= ?", query.StartTime, query.EndTime).
+		Group("user_id")
+
+	var total int64
+	if err = DB.Model(&User{}).
+		Where("status = ?", common.UserStatusEnabled).
+		Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]*UserUsageRankingItem, 0)
+	err = DB.Model(&User{}).
+		Select("users.id AS user_id, users.username, COALESCE(users.display_name, '') AS display_name, COALESCE(aggregated.token_used, 0) AS token_used, COALESCE(aggregated.quota, 0) AS quota, COALESCE(aggregated.count, 0) AS count").
+		Joins("LEFT JOIN (?) AS aggregated ON aggregated.user_id = users.id", aggregate).
+		Where("users.status = ?", common.UserStatusEnabled).
+		Order(orderClause).
+		Order("users.id ASC").
+		Limit(query.PageSize).
+		Offset((query.Page - 1) * query.PageSize).
+		Scan(&items).Error
+	return items, total, err
+}
+
 func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaData []*QuotaData, err error) {
 	if username != "" {
 		return GetQuotaDataByUsername(username, startTime, endTime)

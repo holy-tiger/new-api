@@ -4176,6 +4176,15 @@
     "默认折叠侧边栏": "Mặc định thu gọn thanh bên",
     "默认测试模型": "Mô hình kiểm tra mặc định",
     "默认用户消息": "Xin chào",
-    "默认补全倍率": "Tỷ lệ hoàn thành mặc định"
+    "默认补全倍率": "Tỷ lệ hoàn thành mặc định",
+    "用户使用量排行": "Xếp hạng sử dụng của người dùng",
+    "累计 Token 使用量": "Lượng Token sử dụng tích lũy",
+    "计费金额": "Số tiền tính phí",
+    "显示名称": "Tên hiển thị",
+    "暂无排行数据": "Chưa có dữ liệu xếp hạng",
+    "数据看板统计未启用": "Thống kê bảng điều khiển chưa được bật",
+    "统计数据按小时汇总，可能存在约 5 分钟延迟": "Dữ liệu được tổng hợp theo giờ và có thể trễ khoảng 5 phút",
+    "时间范围不能超过 366 天": "Khoảng thời gian không được vượt quá 366 ngày",
+    "按时间范围查看用户累计使用量": "Xem mức sử dụng tích lũy theo khoảng thời gian"
   }
 }

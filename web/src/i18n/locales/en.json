@@ -3787,6 +3787,15 @@
     "见上方动态计费详情": "See dynamic pricing details above",
     "含时间条件": "Time rules",
     "含请求条件": "Request rules",
-    "（当前仅支持易支付接口，默认使用上方服务器地址作为回调地址！）": "(Currently only supports Epay interface, the default callback address is the server address above!)"
+    "（当前仅支持易支付接口，默认使用上方服务器地址作为回调地址！）": "(Currently only supports Epay interface, the default callback address is the server address above!)",
+    "用户使用量排行": "User Usage Ranking",
+    "累计 Token 使用量": "Cumulative Token Usage",
+    "计费金额": "Billed Amount",
+    "显示名称": "Display Name",
+    "暂无排行数据": "No ranking data available",
+    "数据看板统计未启用": "Dashboard statistics are not enabled",
+    "统计数据按小时汇总，可能存在约 5 分钟延迟": "Statistics are aggregated hourly and may be delayed by about 5 minutes",
+    "时间范围不能超过 366 天": "The time range cannot exceed 366 days",
+    "按时间范围查看用户累计使用量": "View cumulative user usage by time range"
   }
 }
