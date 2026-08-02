@@ -157,9 +157,9 @@ type UserUsageRankingItem struct {
 
 func userUsageRankingOrderClause(field UserUsageRankingSort, order UserUsageRankingOrder) (string, error) {
 	columns := map[UserUsageRankingSort]string{
-		UserUsageRankingSortTokenUsed: "aggregated.token_used",
-		UserUsageRankingSortQuota:     "aggregated.quota",
-		UserUsageRankingSortCount:     "aggregated.count",
+		UserUsageRankingSortTokenUsed: "COALESCE(aggregated.token_used, 0)",
+		UserUsageRankingSortQuota:     "COALESCE(aggregated.quota, 0)",
+		UserUsageRankingSortCount:     "COALESCE(aggregated.count, 0)",
 	}
 	column, ok := columns[field]
 	if !ok {
@@ -181,21 +181,24 @@ func GetUserUsageRanking(query UserUsageRankingQuery) ([]*UserUsageRankingItem, 
 	}
 
 	aggregate := DB.Table("quota_data").
-		Select("user_id, MAX(username) AS historical_username, SUM(token_used) AS token_used, SUM(quota) AS quota, SUM(count) AS count").
+		Select("user_id, SUM(token_used) AS token_used, SUM(quota) AS quota, SUM(count) AS count").
 		Where("created_at >= ? AND created_at <= ?", query.StartTime, query.EndTime).
 		Group("user_id")
 
 	var total int64
-	if err = DB.Table("(?) AS aggregated", aggregate).Count(&total).Error; err != nil {
+	if err = DB.Model(&User{}).
+		Where("status = ?", common.UserStatusEnabled).
+		Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	items := make([]*UserUsageRankingItem, 0)
-	err = DB.Table("(?) AS aggregated", aggregate).
-		Select("aggregated.user_id, COALESCE(users.username, aggregated.historical_username) AS username, COALESCE(users.display_name, '') AS display_name, aggregated.token_used, aggregated.quota, aggregated.count").
-		Joins("LEFT JOIN users ON users.id = aggregated.user_id").
+	err = DB.Model(&User{}).
+		Select("users.id AS user_id, users.username, COALESCE(users.display_name, '') AS display_name, COALESCE(aggregated.token_used, 0) AS token_used, COALESCE(aggregated.quota, 0) AS quota, COALESCE(aggregated.count, 0) AS count").
+		Joins("LEFT JOIN (?) AS aggregated ON aggregated.user_id = users.id", aggregate).
+		Where("users.status = ?", common.UserStatusEnabled).
 		Order(orderClause).
-		Order("aggregated.user_id ASC").
+		Order("users.id ASC").
 		Limit(query.PageSize).
 		Offset((query.Page - 1) * query.PageSize).
 		Scan(&items).Error
