@@ -90,6 +90,7 @@ const NotificationSettings = ({
       subscription: true,
       redemption: true,
       user: true,
+      user_usage_ranking: true,
       setting: true,
     },
   });
@@ -174,6 +175,7 @@ const NotificationSettings = ({
         subscription: true,
         redemption: true,
         user: true,
+        user_usage_ranking: true,
         setting: true,
       },
     };
@@ -310,6 +312,11 @@ const NotificationSettings = ({
           description: t('兑换码生成管理'),
         },
         { key: 'user', title: t('用户管理'), description: t('用户账户管理') },
+        {
+          key: 'user_usage_ranking',
+          title: t('用户使用量排行'),
+          description: t('按时间范围查看用户累计使用量'),
+        },
         {
           key: 'setting',
           title: t('系统设置'),
@@ -478,7 +485,10 @@ const NotificationSettings = ({
                     checkedText={t('开')}
                     uncheckedText={t('关')}
                     onChange={(value) =>
-                      handleFormChange('upstreamModelUpdateNotifyEnabled', value)
+                      handleFormChange(
+                        'upstreamModelUpdateNotifyEnabled',
+                        value,
+                      )
                     }
                     extraText={t(
                       '仅管理员可用。开启后，当系统定时检测全部渠道发现上游模型变更或检测异常时，将按你选择的通知方式发送汇总通知；渠道或模型过多时会自动省略部分明细。',

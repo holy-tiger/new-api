@@ -52,6 +52,7 @@ import SetupCheck from './components/layout/SetupCheck';
 
 const Home = lazy(() => import('./pages/Home'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const UserUsageRanking = lazy(() => import('./pages/UserUsageRanking'));
 const About = lazy(() => import('./pages/About'));
 const UserAgreement = lazy(() => import('./pages/UserAgreement'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
@@ -168,6 +169,16 @@ function App() {
           element={
             <AdminRoute>
               <User />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path='/console/user-usage-ranking'
+          element={
+            <AdminRoute>
+              <Suspense fallback={<Loading />}>
+                <UserUsageRanking />
+              </Suspense>
             </AdminRoute>
           }
         />

@@ -19,7 +19,6 @@ const SortHeader = ({ label, field, sortBy, sortOrder, onSort }) => {
       type='tertiary'
       size='small'
       icon={icon}
-      iconPosition='right'
       onClick={() => onSort(field)}
     >
       {label}
