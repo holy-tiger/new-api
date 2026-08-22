@@ -7,15 +7,31 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 )
 
-func TestShouldResponsesUseChatCompletionsPolicy_DeepSeekFallback(t *testing.T) {
+func TestShouldResponsesUseChatCompletionsPolicy_DeepSeekUsesNativeWhenDisabled(t *testing.T) {
 	policy := model_setting.ResponsesToChatCompletionsPolicy{
 		Enabled:       false,
 		AllChannels:   false,
-		ModelPatterns: []string{"^gpt-5.*$"},
+		ModelPatterns: []string{"^deepseek-v4-.*$"},
 	}
 
-	if !ShouldResponsesUseChatCompletionsPolicy(policy, 12, constant.ChannelTypeDeepSeek, "gpt-5.4") {
-		t.Fatal("expected DeepSeek channels to auto-enable responses-to-chat bridging")
+	if ShouldResponsesUseChatCompletionsPolicy(policy, 12, constant.ChannelTypeDeepSeek, "deepseek-v4-pro") {
+		t.Fatal("expected DeepSeek to use native Responses when fallback policy is disabled")
+	}
+}
+
+func TestShouldResponsesUseChatCompletionsPolicy_ExplicitDeepSeekPolicyHonorsModelPattern(t *testing.T) {
+	policy := model_setting.ResponsesToChatCompletionsPolicy{
+		Enabled:       true,
+		AllChannels:   false,
+		ChannelTypes:  []int{constant.ChannelTypeDeepSeek},
+		ModelPatterns: []string{"^deepseek-v4-.*$"},
+	}
+
+	if !ShouldResponsesUseChatCompletionsPolicy(policy, 12, constant.ChannelTypeDeepSeek, "deepseek-v4-pro") {
+		t.Fatal("expected explicit DeepSeek fallback policy to match deepseek-v4-pro")
+	}
+	if ShouldResponsesUseChatCompletionsPolicy(policy, 12, constant.ChannelTypeDeepSeek, "deepseek-chat") {
+		t.Fatal("expected explicit DeepSeek fallback policy to reject a non-matching model")
 	}
 }
 
