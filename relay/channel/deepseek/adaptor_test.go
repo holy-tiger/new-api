@@ -7,8 +7,26 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/gin-gonic/gin"
 )
+
+func TestGetRequestURL_ResponsesUsesNativeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	url, err := (&Adaptor{}).GetRequestURL(&relaycommon.RelayInfo{
+		RelayMode: relayconstant.RelayModeResponses,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl: "https://api.deepseek.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetRequestURL returned error: %v", err)
+	}
+	if url != "https://api.deepseek.com/responses" {
+		t.Fatalf("expected native Responses URL, got %q", url)
+	}
+}
 
 func TestConvertOpenAIRequest_NormalizesDeveloperRoleToSystem(t *testing.T) {
 	t.Parallel()
