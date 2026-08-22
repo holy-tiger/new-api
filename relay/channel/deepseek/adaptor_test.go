@@ -139,6 +139,32 @@ func TestConvertOpenAIResponsesRequest_MapsDeepSeekV4ReasoningSuffix(t *testing.
 	}
 }
 
+func TestConvertOpenAIResponsesRequest_InitializesReasoningForDeepSeekV4Suffix(t *testing.T) {
+	t.Parallel()
+
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "deepseek-v4-pro-max",
+		},
+	}
+	request := dto.OpenAIResponsesRequest{Model: "client-model-alias"}
+
+	convertedAny, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, request)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequest returned error: %v", err)
+	}
+	converted, ok := convertedAny.(dto.OpenAIResponsesRequest)
+	if !ok {
+		t.Fatalf("expected dto.OpenAIResponsesRequest, got %T", convertedAny)
+	}
+	if converted.Reasoning == nil {
+		t.Fatal("expected reasoning to be initialized for a V4 thinking suffix")
+	}
+	if converted.Reasoning.Effort != "max" {
+		t.Fatalf("expected reasoning effort max, got %q", converted.Reasoning.Effort)
+	}
+}
+
 func TestConvertOpenAIRequest_NormalizesDeveloperRoleToSystem(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
