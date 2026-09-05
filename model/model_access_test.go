@@ -17,7 +17,7 @@ func setupModelAccessTestDB(t *testing.T) {
 	require.NoError(t, err)
 	previousDB := DB
 	DB = db
-	require.NoError(t, DB.AutoMigrate(&Model{}))
+	require.NoError(t, DB.AutoMigrate(&Model{}, &Channel{}))
 	InvalidateModelAccessCache()
 	t.Cleanup(func() {
 		InvalidateModelAccessCache()
@@ -47,6 +47,11 @@ func TestIsModelAccessibleUsesRulePrecedence(t *testing.T) {
 	require.False(t, allowed)
 }
 
+func TestNormalizeUserWhitelist(t *testing.T) {
+	require.Equal(t, []int{2, 7}, NormalizeUserWhitelist([]int{7, 0, 2, 7, -1}))
+	require.Nil(t, NormalizeUserWhitelist([]int{0, -1}))
+}
+
 func TestIsModelAccessibleRootAndAdminSemantics(t *testing.T) {
 	setupModelAccessTestDB(t)
 	require.NoError(t, DB.Create(&Model{
@@ -68,6 +73,20 @@ func TestIsModelAccessibleRootAndAdminSemantics(t *testing.T) {
 	require.True(t, allowed)
 }
 
+func TestIsModelAccessibleCompactSuffixCannotBypass(t *testing.T) {
+	setupModelAccessTestDB(t)
+	require.NoError(t, DB.Create(&Model{
+		ModelName:     "compact-private",
+		NameRule:      NameRuleExact,
+		UserWhitelist: []int{12},
+	}).Error)
+	InvalidateModelAccessCache()
+
+	allowed, err := IsModelAccessible("compact-private-openai-compact", 99, common.RoleCommonUser)
+	require.NoError(t, err)
+	require.False(t, allowed)
+}
+
 func TestFilterModelsForUserRemovesRestrictedModels(t *testing.T) {
 	setupModelAccessTestDB(t)
 	require.NoError(t, DB.Create(&[]Model{
@@ -82,4 +101,20 @@ func TestFilterModelsForUserRemovesRestrictedModels(t *testing.T) {
 	models, err = FilterModelsForUser([]string{"open-model", "private-model"}, 12, common.RoleCommonUser)
 	require.NoError(t, err)
 	require.Equal(t, []string{"open-model", "private-model"}, models)
+}
+
+func TestIsModelAccessibleCannotBypassThroughChannelMapping(t *testing.T) {
+	setupModelAccessTestDB(t)
+	mapping := `{"alias-model":"private-model"}`
+	require.NoError(t, DB.Create(&Model{
+		ModelName:     "private-model",
+		NameRule:      NameRuleExact,
+		UserWhitelist: []int{12},
+	}).Error)
+	require.NoError(t, DB.Create(&Channel{ModelMapping: &mapping}).Error)
+	InvalidateModelAccessCache()
+
+	allowed, err := IsModelAccessible("alias-model", 99, common.RoleCommonUser)
+	require.NoError(t, err)
+	require.False(t, allowed)
 }

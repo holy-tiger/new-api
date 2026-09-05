@@ -21,7 +21,7 @@ func TestEnforceModelAccessAbortsBeforeRouting(t *testing.T) {
 	require.NoError(t, err)
 	previousDB := model.DB
 	model.DB = db
-	require.NoError(t, db.AutoMigrate(&model.Model{}))
+	require.NoError(t, db.AutoMigrate(&model.Model{}, &model.Channel{}))
 	require.NoError(t, db.Create(&model.Model{
 		ModelName:     "private-model",
 		NameRule:      model.NameRuleExact,
