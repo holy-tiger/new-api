@@ -582,7 +582,8 @@ func UpdateUser(c *gin.Context) {
 		updatedUser.Password = "" // rollback to what it should be
 	}
 	updatePassword := updatedUser.Password != ""
-	if err := updatedUser.Edit(updatePassword); err != nil {
+	clearTokenGroups := originUser.Group != updatedUser.Group
+	if err := model.UpdateUserAndClearTokenGroups(&updatedUser, updatePassword, clearTokenGroups); err != nil {
 		common.ApiError(c, err)
 		return
 	}
