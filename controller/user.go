@@ -537,6 +537,11 @@ func GetUserModels(c *gin.Context) {
 			}
 		}
 	}
+	models, err = model.FilterModelsForUser(models, user.Id, user.Role)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
