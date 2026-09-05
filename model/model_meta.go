@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sort"
 	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
@@ -38,12 +39,14 @@ type Model struct {
 	EnableGroups  []string       `json:"enable_groups,omitempty" gorm:"-"`
 	QuotaTypes    []int          `json:"quota_types,omitempty" gorm:"-"`
 	NameRule      int            `json:"name_rule" gorm:"default:0"`
+	UserWhitelist []int          `json:"user_whitelist,omitempty" gorm:"type:text;serializer:json"`
 
 	MatchedModels []string `json:"matched_models,omitempty" gorm:"-"`
 	MatchedCount  int      `json:"matched_count,omitempty" gorm:"-"`
 }
 
 func (mi *Model) Insert() error {
+	mi.UserWhitelist = NormalizeUserWhitelist(mi.UserWhitelist)
 	now := common.GetTimestamp()
 	mi.CreatedTime = now
 	mi.UpdatedTime = now
@@ -74,15 +77,45 @@ func IsModelNameDuplicated(id int, name string) (bool, error) {
 }
 
 func (mi *Model) Update() error {
+	mi.UserWhitelist = NormalizeUserWhitelist(mi.UserWhitelist)
 	mi.UpdatedTime = common.GetTimestamp()
 	// 使用 Select 强制更新所有字段，包括零值
 	return DB.Model(&Model{}).Where("id = ?", mi.Id).
-		Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "name_rule", "updated_time").
+		Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "name_rule", "user_whitelist", "updated_time").
 		Updates(mi).Error
 }
 
 func (mi *Model) Delete() error {
-	return DB.Delete(mi).Error
+	err := DB.Delete(mi).Error
+	if err == nil {
+		InvalidateModelAccessCache()
+	}
+	return err
+}
+
+// NormalizeUserWhitelist removes duplicate and non-positive user IDs while
+// preserving ascending order for stable API responses and database values.
+func NormalizeUserWhitelist(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(ids))
+	result := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	sort.Ints(result)
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func GetVendorModelCounts() (map[int64]int64, error) {
