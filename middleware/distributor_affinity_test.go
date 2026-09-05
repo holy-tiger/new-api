@@ -63,7 +63,7 @@ func setupDistributorAffinityTestDB(t *testing.T) {
 	require.NoError(t, os.Setenv("SQL_DSN", "local"))
 
 	require.NoError(t, model.InitDB())
-	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.Model{}))
 }
 
 func TestDistribute_ClearsStaleAffinityAndFallsBackToAvailableChannel(t *testing.T) {

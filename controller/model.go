@@ -29,6 +29,23 @@ var openAIModels []dto.OpenAIModels
 var openAIModelsMap map[string]dto.OpenAIModels
 var channelId2Models map[int][]string
 
+func getUserRole(c *gin.Context) int {
+	role := c.GetInt("role")
+	if role == 0 {
+		role = common.GetContextKeyInt(c, constant.ContextKeyUserRole)
+	}
+	return role
+}
+
+func filterModelNamesForUser(c *gin.Context, modelNames []string) ([]string, bool) {
+	filtered, err := model.FilterModelsForUser(modelNames, c.GetInt("id"), getUserRole(c))
+	if err != nil {
+		common.ApiError(c, err)
+		return nil, false
+	}
+	return filtered, true
+}
+
 func init() {
 	// https://platform.openai.com/docs/models/model-endpoint-compatibility
 	for i := 0; i < constant.APITypeDummy; i++ {
@@ -199,6 +216,23 @@ func ListModels(c *gin.Context, modelType int) {
 			}
 		}
 	}
+	filteredModels, ok := filterModelNamesForUser(c, lo.Map(userOpenAiModels, func(item dto.OpenAIModels, _ int) string {
+		return item.Id
+	}))
+	if !ok {
+		return
+	}
+	allowedModels := make(map[string]struct{}, len(filteredModels))
+	for _, modelName := range filteredModels {
+		allowedModels[modelName] = struct{}{}
+	}
+	visibleModels := userOpenAiModels[:0]
+	for _, item := range userOpenAiModels {
+		if _, allowed := allowedModels[item.Id]; allowed {
+			visibleModels = append(visibleModels, item)
+		}
+	}
+	userOpenAiModels = visibleModels
 
 	switch modelType {
 	case constant.ChannelTypeAnthropic:
@@ -246,9 +280,17 @@ func ChannelListModels(c *gin.Context) {
 }
 
 func DashboardListModels(c *gin.Context) {
+	filtered := make(map[int][]string, len(channelId2Models))
+	for channelID, modelNames := range channelId2Models {
+		visible, ok := filterModelNamesForUser(c, modelNames)
+		if !ok {
+			return
+		}
+		filtered[channelID] = visible
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data":    channelId2Models,
+		"data":    filtered,
 	})
 }
 
@@ -261,6 +303,21 @@ func EnabledListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
+	allowed, err := model.IsModelAccessible(modelId, c.GetInt("id"), getUserRole(c))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": types.OpenAIError{
+				Message: fmt.Sprintf("You do not have permission to access model '%s'", modelId),
+				Type:    "new_api_error",
+				Code:    string(types.ErrorCodeModelAccessDenied),
+			},
+		})
+		return
+	}
 	if aiModel, ok := openAIModelsMap[modelId]; ok {
 		switch modelType {
 		case constant.ChannelTypeAnthropic:

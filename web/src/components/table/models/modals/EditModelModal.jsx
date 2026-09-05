@@ -59,6 +59,15 @@ const nameRuleOptions = [
   { label: '后缀名称匹配', value: 3 },
 ];
 
+const normalizeUserWhitelist = (ids) => {
+  if (!Array.isArray(ids)) return [];
+  return [
+    ...new Set(
+      ids.map((id) => String(id).trim()).filter((id) => /^[1-9]\d*$/.test(id)),
+    ),
+  ];
+};
+
 const EditModelModal = (props) => {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
@@ -124,6 +133,9 @@ const EditModelModal = (props) => {
     name_rule: props.editingModel?.model_name ? 0 : undefined, // 通过未配置模型过来的固定为精确匹配
     status: true,
     sync_official: true,
+    user_whitelist: normalizeUserWhitelist(
+      props.editingModel?.user_whitelist || [],
+    ),
   });
 
   const handleCancel = () => {
@@ -148,6 +160,7 @@ const EditModelModal = (props) => {
         if (!data.endpoints) {
           data.endpoints = '';
         }
+        data.user_whitelist = normalizeUserWhitelist(data.user_whitelist);
         // 处理status/sync_official，将数字转为布尔值
         data.status = data.status === 1;
         data.sync_official = (data.sync_official ?? 1) === 1;
@@ -196,6 +209,9 @@ const EditModelModal = (props) => {
         ...values,
         tags: Array.isArray(values.tags) ? values.tags.join(',') : values.tags,
         endpoints: values.endpoints || '',
+        user_whitelist: normalizeUserWhitelist(values.user_whitelist).map(
+          (id) => Number(id),
+        ),
         status: values.status ? 1 : 0,
         sync_official: values.sync_official ? 1 : 0,
       };
@@ -363,6 +379,23 @@ const EditModelModal = (props) => {
                       placeholder={t('请输入模型描述')}
                       rows={3}
                       showClear
+                    />
+                  </Col>
+                  <Col span={24}>
+                    <Form.TagInput
+                      field='user_whitelist'
+                      label={t('用户 ID 白名单')}
+                      placeholder={t('输入用户 ID，可用逗号分隔')}
+                      addOnBlur
+                      showClear
+                      onChange={(ids) => {
+                        formApiRef.current?.setValue(
+                          'user_whitelist',
+                          normalizeUserWhitelist(ids),
+                        );
+                      }}
+                      extraText={t('留空表示所有用户可访问；Root 用户默认绕过')}
+                      style={{ width: '100%' }}
                     />
                   </Col>
                   <Col span={24}>

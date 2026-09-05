@@ -240,3 +240,64 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 	require.NotContains(t, ids, "zz-token-tiered-missing-expr-model")
 	require.NotContains(t, ids, "zz-token-unpriced-model")
 }
+
+func TestListModelsFiltersUserWhitelist(t *testing.T) {
+	originalSelfUseMode := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = true
+	t.Cleanup(func() { operation_setting.SelfUseModeEnabled = originalSelfUseMode })
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&model.User{
+		Id:       1002,
+		Username: "whitelist-user",
+		Password: "password",
+		Group:    "default",
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusEnabled,
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "zz-open-model", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-private-model", ChannelId: 1, Enabled: true},
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Model{
+		{ModelName: "zz-open-model", NameRule: model.NameRuleExact},
+		{ModelName: "zz-private-model", NameRule: model.NameRuleExact, UserWhitelist: []int{12}},
+	}).Error)
+	model.InvalidatePricingCache()
+	model.InvalidateModelAccessCache()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Set("id", 1002)
+	ctx.Set("role", common.RoleCommonUser)
+	ListModels(ctx, constant.ChannelTypeOpenAI)
+	ids := decodeListModelsResponse(t, recorder)
+	require.Contains(t, ids, "zz-open-model")
+	require.NotContains(t, ids, "zz-private-model")
+}
+
+func TestDashboardListModelsFiltersUserWhitelist(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&model.Model{
+		ModelName:     "zz-dashboard-private",
+		NameRule:      model.NameRuleExact,
+		UserWhitelist: []int{12},
+	}).Error)
+	model.InvalidateModelAccessCache()
+	previous := channelId2Models
+	channelId2Models = map[int][]string{1: {"zz-dashboard-open", "zz-dashboard-private"}}
+	t.Cleanup(func() { channelId2Models = previous })
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	ctx.Set("id", 1004)
+	ctx.Set("role", common.RoleCommonUser)
+	DashboardListModels(ctx)
+
+	var response struct {
+		Data map[int][]string `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, []string{"zz-dashboard-open"}, response.Data[1])
+}
