@@ -27,6 +27,25 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+func enforceModelAccess(c *gin.Context, modelName string) bool {
+	role := common.GetContextKeyInt(c, constant.ContextKeyUserRole)
+	if role == 0 {
+		role = c.GetInt("role")
+	}
+	allowed, err := model.IsModelAccessible(modelName, c.GetInt("id"), role)
+	if err != nil {
+		abortWithOpenAiMessage(c, http.StatusInternalServerError, i18n.T(c, i18n.MsgDatabaseError))
+		return false
+	}
+	if !allowed {
+		abortWithOpenAiMessage(c, http.StatusForbidden,
+			i18n.T(c, i18n.MsgDistributorModelAccessDenied, map[string]any{"Model": modelName}),
+			types.ErrorCodeModelAccessDenied)
+		return false
+	}
+	return true
+}
+
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var channel *model.Channel
@@ -34,6 +53,9 @@ func Distribute() func(c *gin.Context) {
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+			return
+		}
+		if modelRequest.Model != "" && !enforceModelAccess(c, modelRequest.Model) {
 			return
 		}
 		if ok {
@@ -106,24 +128,24 @@ func Distribute() func(c *gin.Context) {
 						affinityStale = true
 					}
 					if !affinityStale && usingGroup == "auto" {
-							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
-							autoGroups := service.GetUserAutoGroup(userGroup)
-							for _, g := range autoGroups {
-								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
-									selectGroup = g
-									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
-									channel = preferred
-									service.MarkChannelAffinityUsed(c, g, preferred.Id)
-									break
-								}
+						userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+						autoGroups := service.GetUserAutoGroup(userGroup)
+						for _, g := range autoGroups {
+							if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
+								selectGroup = g
+								common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
+								channel = preferred
+								service.MarkChannelAffinityUsed(c, g, preferred.Id)
+								break
 							}
+						}
 						if channel == nil {
 							affinityStale = true
 						}
 					} else if !affinityStale && model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, preferred.Id) {
-							channel = preferred
-							selectGroup = usingGroup
-							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
+						channel = preferred
+						selectGroup = usingGroup
+						service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
 					} else if !affinityStale {
 						affinityStale = true
 					}
