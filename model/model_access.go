@@ -137,7 +137,12 @@ func mappedModelNames(modelName string, mappings map[string][]string) []string {
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		for _, target := range mappings[current] {
+		targets := append([]string(nil), mappings[current]...)
+		normalizedCurrent := normalizedAccessModelName(current)
+		if normalizedCurrent != current {
+			targets = append(targets, mappings[normalizedCurrent]...)
+		}
+		for _, target := range targets {
 			if visited[target] {
 				continue
 			}

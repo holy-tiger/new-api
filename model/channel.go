@@ -451,10 +451,8 @@ func (channel *Channel) Insert() error {
 	if err != nil {
 		return err
 	}
+	InvalidateModelAccessCache()
 	err = channel.AddAbilities(nil)
-	if err == nil {
-		InvalidateModelAccessCache()
-	}
 	return err
 }
 
@@ -502,11 +500,9 @@ func (channel *Channel) Update() error {
 	if err != nil {
 		return err
 	}
+	InvalidateModelAccessCache()
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
-	if err == nil {
-		InvalidateModelAccessCache()
-	}
 	return err
 }
 
@@ -536,10 +532,8 @@ func (channel *Channel) Delete() error {
 	if err != nil {
 		return err
 	}
+	InvalidateModelAccessCache()
 	err = channel.DeleteAbilities()
-	if err == nil {
-		InvalidateModelAccessCache()
-	}
 	return err
 }
 
