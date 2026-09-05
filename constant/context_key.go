@@ -44,6 +44,7 @@ const (
 
 	/* user related keys */
 	ContextKeyUserId      ContextKey = "id"
+	ContextKeyUserRole    ContextKey = "user_role"
 	ContextKeyUserSetting ContextKey = "user_setting"
 	ContextKeyUserQuota   ContextKey = "user_quota"
 	ContextKeyUserStatus  ContextKey = "user_status"
