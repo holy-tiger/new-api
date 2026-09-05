@@ -52,6 +52,20 @@ func TestNormalizeUserWhitelist(t *testing.T) {
 	require.Nil(t, NormalizeUserWhitelist([]int{0, -1}))
 }
 
+func TestModelUpdatePersistsUserWhitelist(t *testing.T) {
+	setupModelAccessTestDB(t)
+	item := &Model{ModelName: "persisted-model", NameRule: NameRuleExact, UserWhitelist: []int{7, 2, 7, 0}}
+	require.NoError(t, item.Insert())
+	require.Equal(t, []int{2, 7}, item.UserWhitelist)
+
+	item.UserWhitelist = []int{35}
+	require.NoError(t, item.Update())
+
+	var loaded Model
+	require.NoError(t, DB.First(&loaded, item.Id).Error)
+	require.Equal(t, []int{35}, loaded.UserWhitelist)
+}
+
 func TestIsModelAccessibleRootAndAdminSemantics(t *testing.T) {
 	setupModelAccessTestDB(t)
 	require.NoError(t, DB.Create(&Model{
