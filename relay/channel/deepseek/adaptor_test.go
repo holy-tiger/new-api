@@ -1,7 +1,10 @@
 package deepseek
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -208,5 +211,114 @@ func TestConvertOpenAIRequest_NormalizesDeveloperRoleToSystem(t *testing.T) {
 	}
 	if convertedReq.Messages[2].Role != "user" {
 		t.Fatalf("expected user role to remain user, got %q", convertedReq.Messages[2].Role)
+	}
+}
+
+func TestConvertOpenAIResponsesRequest_ResponsesLiteActivatesOnlyForMappedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newRequest := func() dto.OpenAIResponsesRequest {
+		return dto.OpenAIResponsesRequest{
+			Model: "gpt-5.6-luna",
+			Input: []byte(`[
+				{"type":"additional_tools","tools":[{"type":"custom","name":"exec","description":"Run JavaScript"}]},
+				{"type":"message","role":"developer","content":[{"type":"input_text","text":"base instructions"}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"run JavaScript"}]}
+			]`),
+		}
+	}
+
+	t.Run("mapped model", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		info := &relaycommon.RelayInfo{
+			RelayMode:       relayconstant.RelayModeResponses,
+			OriginModelName: "gpt-5.6-luna",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelType:       constant.ChannelTypeDeepSeek,
+				UpstreamModelName: "deepseek-v4-flash",
+				IsModelMapped:     true,
+			},
+		}
+
+		convertedAny, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(c, info, newRequest())
+		if err != nil {
+			t.Fatalf("convert request: %v", err)
+		}
+		converted := convertedAny.(dto.OpenAIResponsesRequest)
+		if !c.GetBool(responsesLiteBridgeContextKey) {
+			t.Fatal("mapped Lite request did not activate response bridge")
+		}
+		if strings.Contains(string(converted.Input), "additional_tools") || !strings.Contains(string(converted.Tools), `"type":"function"`) {
+			t.Fatalf("mapped Lite request was not normalized: %+v", converted)
+		}
+	})
+
+	t.Run("direct DeepSeek model", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		request := newRequest()
+		originalInput := append([]byte(nil), request.Input...)
+		info := &relaycommon.RelayInfo{
+			RelayMode:       relayconstant.RelayModeResponses,
+			OriginModelName: "deepseek-v4-flash",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelType:       constant.ChannelTypeDeepSeek,
+				UpstreamModelName: "deepseek-v4-flash",
+				IsModelMapped:     false,
+			},
+		}
+
+		convertedAny, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(c, info, request)
+		if err != nil {
+			t.Fatalf("convert request: %v", err)
+		}
+		converted := convertedAny.(dto.OpenAIResponsesRequest)
+		if c.GetBool(responsesLiteBridgeContextKey) {
+			t.Fatal("direct DeepSeek request activated bridge")
+		}
+		if string78 := converted.Input; !strings.Contains(string(string78), "additional_tools") || string(string78) != string(originalInput) {
+			t.Fatalf("direct request changed: %s", converted.Input)
+		}
+	})
+}
+
+func TestDoResponse_ResponsesLiteRestoresMappedExecCall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(responsesLiteBridgeContextKey, true)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{
+			"id":"resp_1","object":"response","status":"completed",
+			"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"source\":\"text(\\\"OK\\\");\"}","status":"completed"}],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+		}`)),
+	}
+	info := &relaycommon.RelayInfo{
+		RelayMode: relayconstant.RelayModeResponses,
+		IsStream:  false,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "deepseek-v4-flash",
+		},
+	}
+
+	usage, apiErr := (&Adaptor{}).DoResponse(c, resp, info)
+	if apiErr != nil {
+		t.Fatalf("DoResponse error: %v", apiErr)
+	}
+	if usage == nil {
+		t.Fatal("expected usage")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"custom_tool_call"`) || !strings.Contains(body, `"input":"text(\"OK\");"`) {
+		t.Fatalf("exec call was not restored: %s", body)
+	}
+	if strings.Contains(body, `"type":"function_call"`) {
+		t.Fatalf("function call leaked downstream: %s", body)
 	}
 }

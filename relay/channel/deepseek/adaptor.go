@@ -1,6 +1,7 @@
 package deepseek
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -172,7 +173,16 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 	return nil, errors.New("not implemented")
 }
 
-func (a *Adaptor) ConvertOpenAIResponsesRequest(_ *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	if info != nil && info.ChannelMeta != nil && info.IsModelMapped {
+		enabled, err := normalizeDeepSeekResponsesLiteBridgeRequest(&request)
+		if err != nil {
+			return nil, fmt.Errorf("normalize DeepSeek Responses Lite bridge request: %w", err)
+		}
+		if enabled && c != nil {
+			c.Set(responsesLiteBridgeContextKey, true)
+		}
+	}
 	applyDeepSeekV4ResponsesThinkingSuffix(info, &request)
 	return request, nil
 }
@@ -211,9 +221,47 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		adaptor := claude.Adaptor{}
 		return adaptor.DoResponse(c, resp, info)
 	default:
+		if info.RelayMode == constant.RelayModeResponses && c != nil && c.GetBool(responsesLiteBridgeContextKey) {
+			if info.IsStream {
+				if resp != nil && resp.Body != nil {
+					resp.Body = newResponsesLiteTransformingBody(resp.Body)
+				}
+			} else if rewriteErr := rewriteDeepSeekResponsesLiteHTTPResponse(resp); rewriteErr != nil {
+				return nil, types.NewOpenAIError(
+					rewriteErr,
+					types.ErrorCodeBadResponseBody,
+					http.StatusBadGateway,
+				)
+			}
+		}
 		adaptor := openai.Adaptor{}
 		return adaptor.DoResponse(c, resp, info)
 	}
+}
+
+func rewriteDeepSeekResponsesLiteHTTPResponse(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return fmt.Errorf("invalid DeepSeek Responses response body")
+	}
+	originalBody := resp.Body
+	data, err := io.ReadAll(originalBody)
+	closeErr := originalBody.Close()
+	if err != nil {
+		return fmt.Errorf("read DeepSeek Responses body: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close DeepSeek Responses body: %w", closeErr)
+	}
+	converted, err := transformDeepSeekResponsesLiteResponse(data)
+	if err != nil {
+		return err
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(converted))
+	resp.ContentLength = int64(len(converted))
+	if resp.Header != nil {
+		resp.Header.Del("Content-Length")
+	}
+	return nil
 }
 
 func (a *Adaptor) GetModelList() []string {
