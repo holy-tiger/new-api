@@ -218,7 +218,7 @@ func TestTransformDeepSeekResponsesLiteResponseRestoresExecCustomCall(t *testing
 		t.Fatalf("unexpected custom input: %#v", call)
 	}
 	if _, exists := call["arguments"]; exists {
-		t.Fatalf("function arguments leaked downstream:	parser %#v", call)
+		t.Fatalf("function arguments leaked downstream: %#v", call)
 	}
 }
 

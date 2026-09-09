@@ -1,6 +1,7 @@
 package deepseek
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -277,7 +278,7 @@ func TestConvertOpenAIResponsesRequest_ResponsesLiteActivatesOnlyForMappedModel(
 		if c.GetBool(responsesLiteBridgeContextKey) {
 			t.Fatal("direct DeepSeek request activated bridge")
 		}
-		if string78 := converted.Input; !strings.Contains(string(string78), "additional_tools") || string(string78) != string(originalInput) {
+		if !strings.Contains(string(converted.Input), "additional_tools") || !bytes.Equal(converted.Input, originalInput) {
 			t.Fatalf("direct request changed: %s", converted.Input)
 		}
 	})
