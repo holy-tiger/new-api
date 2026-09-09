@@ -3,6 +3,7 @@ package deepseek
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -247,4 +248,144 @@ func TestTransformDeepSeekResponsesLiteResponseRejectsMalformedExecArguments(t *
 			t.Fatalf("expected malformed arguments error for %q, got %v", arguments, err)
 		}
 	}
+}
+
+func TestDeepSeekResponsesLiteSSETransformsExecEventSequence(t *testing.T) {
+	t.Parallel()
+
+	transformer := &responsesLiteSSETransformer{}
+	added := `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_123","call_id":"call_123","name":"exec","arguments":"","status":"in_progress"}}`
+	addedOutput, err := transformer.Transform(added)
+	if err != nil {
+		t.Fatalf("transform added: %v", err)
+	}
+	if len(addedOutput) != 1 {
+		t.Fatalf("expected one added event, got %#v", addedOutput)
+	}
+	addedEvent := decodeJSONMapForTest(t, addedOutput[0])
+	addedItem := addedEvent["item"].(map[string]any)
+	if addedItem["type"] != "custom_tool_call" || addedItem["id"] != "ctc_call_123" || addedItem["name"] != "exec" {
+		t.Fatalf("unexpected added item: %#v", addedItem)
+	}
+
+	for _, delta := range []string{`{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":1,"delta":"{\"sou"}`, `{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":1,"delta":"rce\":\"text("}`, `{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":1,"delta":"\\\"OK\\\");\"}"}`} {
+		output, err := transformer.Transform(delta)
+		if err != nil {
+			t.Fatalf("transform delta: %v", err)
+		}
+		if len(output) != 0 {
+			t.Fatalf("exec function delta leaked downstream: %#v", output)
+		}
+	}
+
+	done := `{"type":"response.function_call_arguments.done","item_id":"fc_123","output_index":1,"arguments":"{\"source\":\"text(\\\"OK\\\");\"}"}`
+	doneOutput, err := transformer.Transform(done)
+	if err != nil {
+		t.Fatalf("transform arguments done: %v", err)
+	}
+	if len(doneOutput) != 2 {
+		t.Fatalf("expected custom input delta and done, got %#v", doneOutput)
+	}
+	deltaEvent := decodeJSONMapForTest(t, doneOutput[0])
+	doneEvent := decodeJSONMapForTest(t, doneOutput[1])
+	if deltaEvent["type"] != "response.custom_tool_call_input.delta" || deltaEvent["item_id"] != "ctc_call_123" || deltaEvent["delta"] != `text("OK");` {
+		t.Fatalf("unexpected custom delta: %#v", deltaEvent)
+	}
+	if doneEvent["type"] != "response.custom_tool_call_input.done" || doneEvent["item_id"] != "ctc_call_123" || doneEvent["input"] != `text("OK");` {
+		t.Fatalf("unexpected custom done: %#v", doneEvent)
+	}
+
+	itemDone := `{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_123","call_id":"call_123","name":"exec","arguments":"{\"source\":\"text(\\\"OK\\\");\"}","status":"completed"}}`
+	itemDoneOutput, err := transformer.Transform(itemDone)
+	if err != nil {
+		t.Fatalf("transform item done: %v", err)
+	}
+	if len(itemDoneOutput) != 1 {
+		t.Fatalf("expected one item done event, got %#v", itemDoneOutput)
+	}
+	itemDoneEvent := decodeJSONMapForTest(t, itemDoneOutput[0])
+	completedItem := itemDoneEvent["item"].(map[string]any)
+	if completedItem["type"] != "custom_tool_call" || completedItem["id"] != "ctc_call_123" || completedItem["input"] != `text("OK");` {
+		t.Fatalf("unexpected completed item: %#v", completedItem)
+	}
+
+	completed := `{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"function_call","id":"fc_123","call_id":"call_123","name":"exec","arguments":"{\"source\":\"text(\\\"OK\\\");\"}","status":"completed"}]}}`
+	completedOutput, err := transformer.Transform(completed)
+	if err != nil {
+		t.Fatalf("transform response completed: %v", err)
+	}
+	completedEvent := decodeJSONMapForTest(t, completedOutput[0])
+	response := completedEvent["response"].(map[string]any)
+	terminalItem := response["output"].([]any)[0].(map[string]any)
+	if terminalItem["type"] != "custom_tool_call" || terminalItem["id"] != "ctc_call_123" {
+		t.Fatalf("unexpected terminal output: %#v", terminalItem)
+	}
+}
+
+func TestDeepSeekResponsesLiteSSEPassesNonExecEventUnchanged(t *testing.T) {
+	t.Parallel()
+
+	transformer := &responsesLiteSSETransformer{}
+	input := ` {"type":"response.output_text.delta","delta":"hello"} `
+	output, err := transformer.Transform(input)
+	if err != nil {
+		t.Fatalf("transform text event: %v", err)
+	}
+	if !reflect.DeepEqual(output, []string{input}) {
+		t.Fatalf("non-exec event changed: %#v", output)
+	}
+}
+
+func TestDeepSeekResponsesLiteSSERejectsMalformedExecDone(t *testing.T) {
+	t.Parallel()
+
+	transformer := &responsesLiteSSETransformer{}
+	added := `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec"}}`
+	if _, err := transformer.Transform(added); err != nil {
+		t.Fatalf("transform added: %v", err)
+	}
+	badDone := `{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{}"}`
+	if _, err := transformer.Transform(badDone); err == nil || !strings.Contains(err.Error(), "exec function arguments") {
+		t.Fatalf("expected malformed arguments error, got %v", err)
+	}
+}
+
+func TestDeepSeekResponsesLiteSSEBodyTransformsIncrementally(t *testing.T) {
+	t.Parallel()
+
+	source := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}`,
+		``,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"source\":\"text(\\\"OK\\\");\"}"}`,
+		``,
+		`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"source\":\"text(\\\"OK\\\");\"}"}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	body := newResponsesLiteTransformingBody(io.NopCloser(strings.NewReader(source)))
+	output, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read transformed body: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close transformed body: %v", err)
+	}
+	text := string(output)
+	if !strings.Contains(text, `"type":"response.custom_tool_call_input.done"`) || !strings.Contains(text, `data: [DONE]`) {
+		t.Fatalf("missing transformed events:\n%s", text)
+	}
+	if strings.Contains(text, `response.function_call_arguments`) {
+		t.Fatalf("function argument event leaked:\n%s", text)
+	}
+}
+
+func decodeJSONMapForTest(t *testing.T, data string) map[string]any {
+	t.Helper()
+	var value map[string]any
+	if err := common.UnmarshalJsonStr(data, &value); err != nil {
+		t.Fatalf("decode JSON %q: %v", data, err)
+	}
+	return value
 }

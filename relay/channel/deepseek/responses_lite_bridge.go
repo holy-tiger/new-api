@@ -1,9 +1,12 @@
 package deepseek
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -442,4 +445,308 @@ func rawJSONStringMapField(fields map[string]json.RawMessage, key string) (strin
 		return "", false
 	}
 	return value, true
+}
+
+type responsesLiteExecStreamCall struct {
+	upstreamItemID   string
+	downstreamItemID string
+	callID           string
+	arguments        strings.Builder
+	inputEmitted     bool
+}
+
+type responsesLiteSSETransformer struct {
+	callsByItemID map[string]*responsesLiteExecStreamCall
+}
+
+func (t *responsesLiteSSETransformer) Transform(data string) ([]string, error) {
+	var event map[string]json.RawMessage
+	if err := common.UnmarshalJsonStr(data, &event); err != nil {
+		return nil, fmt.Errorf("decode DeepSeek Responses SSE event: %w", err)
+	}
+	eventType, ok := rawJSONStringMapField(event, "type")
+	if !ok {
+		return []string{data}, nil
+	}
+
+	switch eventType {
+	case "response.output_item.added":
+		return t.transformOutputItemAdded(data, event)
+	case "response.function_call_arguments.delta":
+		return t.transformFunctionArgumentsDelta(data, event)
+	case "response.function_call_arguments.done":
+		return t.transformFunctionArgumentsDone(data, event)
+	case "response.output_item.done":
+		return t.transformOutputItemDone(data, event)
+	case "response.completed", "response.incomplete":
+		return transformResponsesLiteTerminalEvent(data, event)
+	default:
+		return []string{data}, nil
+	}
+}
+
+func (t *responsesLiteSSETransformer) transformOutputItemAdded(data string, event map[string]json.RawMessage) ([]string, error) {
+	itemRaw, ok := event["item"]
+	if !ok || common.GetJsonType(itemRaw) != "object" {
+		return []string{data}, nil
+	}
+	var item map[string]json.RawMessage
+	if err := common.Unmarshal(itemRaw, &item); err != nil {
+		return nil, fmt.Errorf("decode output_item.added item: %w", err)
+	}
+	itemType, typeOK := rawJSONStringMapField(item, "type")
+	name, nameOK := rawJSONStringMapField(item, "name")
+	if !typeOK || !nameOK || itemType != "function_call" || name != responsesLiteExecToolName {
+		return []string{data}, nil
+	}
+	upstreamItemID, idOK := rawJSONStringMapField(item, "id")
+	callID, callIDOK := rawJSONStringMapField(item, "call_id")
+	if !idOK || upstreamItemID == "" || !callIDOK || callID == "" {
+		return nil, fmt.Errorf("exec output_item.added is missing id or call_id")
+	}
+	if t.callsByItemID == nil {
+		t.callsByItemID = make(map[string]*responsesLiteExecStreamCall)
+	}
+	call := &responsesLiteExecStreamCall{
+		upstreamItemID:   upstreamItemID,
+		downstreamItemID: "ctc_" + callID,
+		callID:           callID,
+	}
+	t.callsByItemID[upstreamItemID] = call
+
+	customType, err := common.Marshal("custom_tool_call")
+	if err != nil {
+		return nil, err
+	}
+	downstreamID, err := common.Marshal(call.downstreamItemID)
+	if err != nil {
+		return nil, err
+	}
+	item["type"] = customType
+	item["id"] = downstreamID
+	delete(item, "arguments")
+	convertedItem, err := common.Marshal(item)
+	if err != nil {
+		return nil, fmt.Errorf("encode custom output_item.added item: %w", err)
+	}
+	event["item"] = convertedItem
+	convertedEvent, err := common.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("encode custom output_item.added event: %w", err)
+	}
+	return []string{string(convertedEvent)}, nil
+}
+
+func (t *responsesLiteSSETransformer) transformFunctionArgumentsDelta(data string, event map[string]json.RawMessage) ([]string, error) {
+	itemID, ok := rawJSONStringMapField(event, "item_id")
+	if !ok || t.callsByItemID == nil {
+		return []string{data}, nil
+	}
+	call, tracked := t.callsByItemID[itemID]
+	if !tracked {
+		return []string{data}, nil
+	}
+	delta, ok := rawJSONStringMapField(event, "delta")
+	if ok {
+		call.arguments.WriteString(delta)
+	}
+	return nil, nil
+}
+
+func (t *responsesLiteSSETransformer) transformFunctionArgumentsDone(data string, event map[string]json.RawMessage) ([]string, error) {
+	itemID, ok := rawJSONStringMapField(event, "item_id")
+	if !ok || t.callsByItemID == nil {
+		return []string{data}, nil
+	}
+	call, tracked := t.callsByItemID[itemID]
+	if !tracked {
+		return []string{data}, nil
+	}
+	if call.inputEmitted {
+		return nil, nil
+	}
+	arguments, ok := rawJSONStringMapField(event, "arguments")
+	if !ok || arguments == "" {
+		arguments = call.arguments.String()
+	}
+	return t.customInputEvents(call, event["output_index"], arguments)
+}
+
+func (t *responsesLiteSSETransformer) transformOutputItemDone(data string, event map[string]json.RawMessage) ([]string, error) {
+	itemRaw, ok := event["item"]
+	if !ok || common.GetJsonType(itemRaw) != "object" {
+		return []string{data}, nil
+	}
+	var item map[string]json.RawMessage
+	if err := common.Unmarshal(itemRaw, &item); err != nil {
+		return nil, fmt.Errorf("decode output_item.done item: %w", err)
+	}
+	itemID, _ := rawJSONStringMapField(item, "id")
+	call := t.callsByItemID[itemID]
+	converted, changed, err := transformDeepSeekResponsesLiteOutputItem(item)
+	if err != nil {
+		return nil, fmt.Errorf("convert output_item.done item: %w", err)
+	}
+	if !changed {
+		return []string{data}, nil
+	}
+
+	var output []string
+	if call != nil && !call.inputEmitted {
+		arguments, _ := rawJSONStringMapField(item, "arguments")
+		inputEvents, err := t.customInputEvents(call, event["output_index"], arguments)
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, inputEvents...)
+	}
+	convertedItem, err := common.Marshal(converted)
+	if err != nil {
+		return nil, fmt.Errorf("encode custom output_item.done item: %w", err)
+	}
+	event["item"] = convertedItem
+	convertedEvent, err := common.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("encode custom output_item.done event: %w", err)
+	}
+	output = append(output, string(convertedEvent))
+	return output, nil
+}
+
+func (t *responsesLiteSSETransformer) customInputEvents(call *responsesLiteExecStreamCall, outputIndex json.RawMessage, arguments string) ([]string, error) {
+	source, err := responsesLiteExecSource(arguments)
+	if err != nil {
+		return nil, err
+	}
+	call.inputEmitted = true
+	delta := map[string]any{
+		"type":         "response.custom_tool_call_input.delta",
+		"item_id":      call.downstreamItemID,
+		"output_index": rawJSONValue(outputIndex),
+		"delta":        source,
+	}
+	done := map[string]any{
+		"type":         "response.custom_tool_call_input.done",
+		"item_id":      call.downstreamItemID,
+		"output_index": rawJSONValue(outputIndex),
+		"input":        source,
+	}
+	deltaJSON, err := common.Marshal(delta)
+	if err != nil {
+		return nil, err
+	}
+	doneJSON, err := common.Marshal(done)
+	if err != nil {
+		return nil, err
+	}
+	return []string{string(deltaJSON), string(doneJSON)}, nil
+}
+
+func responsesLiteExecSource(arguments string) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := common.Unmarshal([]byte(arguments), &fields); err != nil {
+		return "", fmt.Errorf("exec function arguments contain invalid JSON: %w", err)
+	}
+	sourceRaw, ok := fields["source"]
+	if !ok {
+		return "", fmt.Errorf("exec function arguments are missing string source")
+	}
+	var source string
+	if err := common.Unmarshal(sourceRaw, &source); err != nil {
+		return "", fmt.Errorf("exec function arguments source must be a string: %w", err)
+	}
+	return source, nil
+}
+
+func rawJSONValue(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return value
+}
+
+func transformResponsesLiteTerminalEvent(data string, event map[string]json.RawMessage) ([]string, error) {
+	responseRaw, ok := event["response"]
+	if !ok || common.GetJsonType(responseRaw) != "object" {
+		return []string{data}, nil
+	}
+	convertedResponse, err := transformDeepSeekResponsesLiteResponse(responseRaw)
+	if err != nil {
+		return nil, fmt.Errorf("convert terminal Responses output: %w", err)
+	}
+	if bytes.Equal(convertedResponse, responseRaw) {
+		return []string{data}, nil
+	}
+	event["response"] = convertedResponse
+	convertedEvent, err := common.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("encode terminal Responses event: %w", err)
+	}
+	return []string{string(convertedEvent)}, nil
+}
+
+type responsesLiteTransformingBody struct {
+	source      io.ReadCloser
+	scanner     *bufio.Scanner
+	transformer responsesLiteSSETransformer
+	pending     bytes.Buffer
+	terminalErr error
+}
+
+func newResponsesLiteTransformingBody(source io.ReadCloser) io.ReadCloser {
+	scanner := bufio.NewScanner(source)
+	scanner.Buffer(make([]byte, 64<<10), 64<<20)
+	return &responsesLiteTransformingBody{
+		source:  source,
+		scanner: scanner,
+	}
+}
+
+func (b *responsesLiteTransformingBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for b.pending.Len() == 0 && b.terminalErr == nil {
+		if !b.scanner.Scan() {
+			b.terminalErr = b.scanner.Err()
+			if b.terminalErr == nil {
+				b.terminalErr = io.EOF
+			}
+			break
+		}
+		line := b.scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			b.pending.WriteString("data: [DONE]\n\n")
+			continue
+		}
+		converted, err := b.transformer.Transform(data)
+		if err != nil {
+			b.terminalErr = err
+			break
+		}
+		for _, event := range converted {
+			b.pending.WriteString("data: ")
+			b.pending.WriteString(event)
+			b.pending.WriteString("\n\n")
+		}
+	}
+	if b.pending.Len() > 0 {
+		return b.pending.Read(p)
+	}
+	return 0, b.terminalErr
+}
+
+func (b *responsesLiteTransformingBody) Close() error {
+	return b.source.Close()
 }
