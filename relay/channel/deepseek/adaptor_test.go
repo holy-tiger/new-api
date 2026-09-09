@@ -235,6 +235,9 @@ func TestConvertOpenAIResponsesRequest_ResponsesLiteActivatesOnlyForMappedModel(
 		info := &relaycommon.RelayInfo{
 			RelayMode:       relayconstant.RelayModeResponses,
 			OriginModelName: "gpt-5.6-luna",
+			ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{
+				BuiltInTools: make(map[string]*relaycommon.BuildInToolInfo),
+			},
 			ChannelMeta: &relaycommon.ChannelMeta{
 				ChannelType:       constant.ChannelTypeDeepSeek,
 				UpstreamModelName: "deepseek-v4-flash",
@@ -252,6 +255,9 @@ func TestConvertOpenAIResponsesRequest_ResponsesLiteActivatesOnlyForMappedModel(
 		}
 		if strings.Contains(string(converted.Input), "additional_tools") || !strings.Contains(string(converted.Tools), `"type":"function"`) {
 			t.Fatalf("mapped Lite request was not normalized: %+v", converted)
+		}
+		if _, ok := info.ResponsesUsageInfo.BuiltInTools["function"]; !ok {
+			t.Fatal("promoted function tools were not registered for response usage handling")
 		}
 	})
 

@@ -182,6 +182,13 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 		if enabled && c != nil {
 			c.Set(responsesLiteBridgeContextKey, true)
 		}
+		if enabled && info.ResponsesUsageInfo != nil && info.ResponsesUsageInfo.BuiltInTools != nil {
+			if _, exists := info.ResponsesUsageInfo.BuiltInTools["function"]; !exists {
+				info.ResponsesUsageInfo.BuiltInTools["function"] = &relaycommon.BuildInToolInfo{
+					ToolName: "function",
+				}
+			}
+		}
 	}
 	applyDeepSeekV4ResponsesThinkingSuffix(info, &request)
 	return request, nil
