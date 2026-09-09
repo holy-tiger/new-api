@@ -183,3 +183,68 @@ func TestNormalizeDeepSeekResponsesLiteBridgeRequestRejectsMalformedToolsAtomica
 		t.Fatalf("request mutated after error: %+v", request)
 	}
 }
+
+func TestTransformDeepSeekResponsesLiteResponseRestoresExecCustomCall(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"status":"completed",
+		"output":[
+			{"type":"reasoning","id":"rs_1","summary":[]},
+			{"type":"function_call","id":"fc_123","call_id":"call_123","name":"exec","arguments":"{\"source\":\"text(\\\"OK\\\");\"}","status":"completed"}
+		]
+	}`)
+
+	output, err := transformDeepSeekResponsesLiteResponse(input)
+	if err != nil {
+		t.Fatalf("transform response: %v", err)
+	}
+	var response map[string]any
+	if err := common.Unmarshal(output, &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	items := response["output"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("unexpected output: %#v", items)
+	}
+	call := items[1].(map[string]any)
+	if call["type"] != "custom_tool_call" || call["id"] != "ctc_call_123" || call["call_id"] != "call_123" || call["name"] != "exec" {
+		t.Fatalf("unexpected custom call: %#v", call)
+	}
+	if call["input"] != `text("OK");` || call["status"] != "completed" {
+		t.Fatalf("unexpected custom input: %#v", call)
+	}
+	if _, exists := call["arguments"]; exists {
+		t.Fatalf("function arguments leaked downstream:	parser %#v", call)
+	}
+}
+
+func TestTransformDeepSeekResponsesLiteResponseLeavesNonExecCallUnchanged(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"wait","arguments":"{}"}]}`)
+	output, err := transformDeepSeekResponsesLiteResponse(input)
+	if err != nil {
+		t.Fatalf("transform response: %v", err)
+	}
+	if !bytes.Equal(output, input) {
+		t.Fatalf("non-exec response changed:\nwant %s\n got %s", input, output)
+	}
+}
+
+func TestTransformDeepSeekResponsesLiteResponseRejectsMalformedExecArguments(t *testing.T) {
+	t.Parallel()
+
+	for _, arguments := range []string{`not-json`, `{}`, `{"source":42}`} {
+		argumentsJSON, err := common.Marshal(arguments)
+		if err != nil {
+			t.Fatalf("encode arguments: %v", err)
+		}
+		input := []byte(`{"output":[{"type":"function_call","call_id":"call_1","name":"exec","arguments":` + string(argumentsJSON) + `}]}`)
+		if _, err := transformDeepSeekResponsesLiteResponse(input); err == nil || !strings.Contains(err.Error(), "exec function arguments") {
+			t.Fatalf("expected malformed arguments error for %q, got %v", arguments, err)
+		}
+	}
+}

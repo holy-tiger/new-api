@@ -323,3 +323,123 @@ func containsRawJSON(values []json.RawMessage, candidate json.RawMessage) bool {
 	}
 	return false
 }
+
+func transformDeepSeekResponsesLiteResponse(data []byte) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := common.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("decode DeepSeek Responses body: %w", err)
+	}
+	outputRaw, exists := response["output"]
+	if !exists || common.GetJsonType(outputRaw) != "array" {
+		return data, nil
+	}
+	var output []json.RawMessage
+	if err := common.Unmarshal(outputRaw, &output); err != nil {
+		return nil, fmt.Errorf("decode DeepSeek Responses output: %w", err)
+	}
+
+	changed := false
+	convertedOutput := make([]json.RawMessage, len(output))
+	for index, raw := range output {
+		convertedOutput[index] = raw
+		if common.GetJsonType(raw) != "object" {
+			continue
+		}
+		var item map[string]json.RawMessage
+		if err := common.Unmarshal(raw, &item); err != nil {
+			return nil, fmt.Errorf("decode DeepSeek Responses output[%d]: %w", index, err)
+		}
+		converted, itemChanged, err := transformDeepSeekResponsesLiteOutputItem(item)
+		if err != nil {
+			return nil, fmt.Errorf("convert DeepSeek Responses output[%d]: %w", index, err)
+		}
+		if !itemChanged {
+			continue
+		}
+		convertedRaw, err := common.Marshal(converted)
+		if err != nil {
+			return nil, fmt.Errorf("encode DeepSeek Responses output[%d]: %w", index, err)
+		}
+		convertedOutput[index] = convertedRaw
+		changed = true
+	}
+	if !changed {
+		return data, nil
+	}
+	encodedOutput, err := common.Marshal(convertedOutput)
+	if err != nil {
+		return nil, fmt.Errorf("encode DeepSeek Responses output: %w", err)
+	}
+	response["output"] = encodedOutput
+	converted, err := common.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("encode DeepSeek Responses body: %w", err)
+	}
+	return converted, nil
+}
+
+func transformDeepSeekResponsesLiteOutputItem(item map[string]json.RawMessage) (map[string]json.RawMessage, bool, error) {
+	itemType, typeOK := rawJSONStringMapField(item, "type")
+	name, nameOK := rawJSONStringMapField(item, "name")
+	if !typeOK || !nameOK || itemType != "function_call" || name != responsesLiteExecToolName {
+		return item, false, nil
+	}
+	callID, ok := rawJSONStringMapField(item, "call_id")
+	if !ok || callID == "" {
+		return nil, false, fmt.Errorf("exec function call is missing call_id")
+	}
+	argumentsRaw, ok := item["arguments"]
+	if !ok {
+		return nil, false, fmt.Errorf("exec function arguments are missing")
+	}
+	var argumentsString string
+	if err := common.Unmarshal(argumentsRaw, &argumentsString); err != nil {
+		return nil, false, fmt.Errorf("exec function arguments must be a JSON string: %w", err)
+	}
+	var arguments map[string]json.RawMessage
+	if err := common.Unmarshal([]byte(argumentsString), &arguments); err != nil {
+		return nil, false, fmt.Errorf("exec function arguments contain invalid JSON: %w", err)
+	}
+	sourceRaw, ok := arguments["source"]
+	if !ok {
+		return nil, false, fmt.Errorf("exec function arguments are missing string source")
+	}
+	var source string
+	if err := common.Unmarshal(sourceRaw, &source); err != nil {
+		return nil, false, fmt.Errorf("exec function arguments source must be a string: %w", err)
+	}
+
+	converted := make(map[string]json.RawMessage, len(item)+1)
+	for key, value := range item {
+		converted[key] = value
+	}
+	customType, err := common.Marshal("custom_tool_call")
+	if err != nil {
+		return nil, false, err
+	}
+	downstreamID, err := common.Marshal("ctc_" + callID)
+	if err != nil {
+		return nil, false, err
+	}
+	input, err := common.Marshal(source)
+	if err != nil {
+		return nil, false, err
+	}
+	converted["type"] = customType
+	converted["id"] = downstreamID
+	converted["input"] = input
+	delete(converted, "arguments")
+	return converted, true, nil
+}
+
+func rawJSONStringMapField(fields map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := fields[key]
+	if !ok || common.GetJsonType(raw) != "string" {
+		return "", false
+	}
+	var value string
+	if common.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
+}
