@@ -15,7 +15,7 @@
 
 services:
   new-api:
-    image: new-api:release20260705
+    image: new-api:model-user-whitelist-75d0fffe
     container_name: new-api
     restart: always
     command: --log-dir /app/logs

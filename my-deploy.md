@@ -132,6 +132,65 @@ docker compose up -d new-api
 
 它不会删除 `postgres`、`redis`，也不会清空 `pg_data`。
 
+### 3.3.1 重要：必须在原来的 compose 项目里更新
+
+`docker compose` 默认会把当前目录名当成 project name。
+
+例如在目录 `new-api-github` 下执行：
+
+```bash
+docker compose up -d new-api
+```
+
+Compose 可能会尝试创建一套新的资源：
+
+- `new-api-github_new-api-network`
+- `new-api-github_pg_data`
+
+但如果 `docker-compose.yml` 里写死了：
+
+```yaml
+container_name: new-api
+container_name: postgres
+container_name: redis
+```
+
+而机器上已经存在旧的 `new-api`、`postgres`、`redis` 容器，就会报容器名冲突，例如：
+
+```text
+Error response from daemon: Conflict. The container name "/redis" is already in use
+```
+
+这不是镜像问题，而是你在“新的 compose 项目”里试图创建和旧环境同名的容器。
+
+正确做法：
+
+1. 回到原来部署这套服务时使用的目录，再执行：
+
+```bash
+docker compose up -d new-api
+```
+
+2. 或者在任意目录显式指定原来的 project name：
+
+```bash
+docker compose -p <原项目名> up -d new-api
+```
+
+先确认现有 compose 项目：
+
+```bash
+docker compose ls
+```
+
+查看现有容器：
+
+```bash
+docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+```
+
+如果你的目标是“只更新已有的 `new-api`”，不要在新的目录名下直接运行默认的 `docker compose up -d new-api`。
+
 ### 3.4 更新后检查
 
 ```bash
