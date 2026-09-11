@@ -201,15 +201,28 @@ update_channel_status() {
     local payload
 
     payload=$(printf '{"id":%s,"status":%s}' "$channel_id" "$status")
-    if ! response=$(curl -sS --fail-with-body -X PUT "${API_URL}/api/channel/" \
+    if ! response=$(curl -sS -X PUT "${API_URL}/api/channel/" \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
         -H "New-Api-User: ${ADMIN_USER_ID}" \
         -H 'Content-Type: application/json' \
-        --data "$payload"); then
+        --data "$payload" \
+        -w "\n%{http_code}"); then
         return 1
     fi
 
-    printf '%s' "$response" | jq -e '.success == true' >/dev/null 2>&1
+    local http_status
+    local response_body
+    http_status=$(printf "%s\n" "$response" | tail -n 1)
+    response_body=$(printf "%s\n" "$response" | sed '$d')
+    if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+        log "API 请求失败: channel_id=${channel_id}, http_status=${http_status}, response=${response_body}"
+        return 1
+    fi
+
+    if ! printf '%s' "$response_body" | jq -e '.success == true' >/dev/null 2>&1; then
+        log "API 返回失败: channel_id=${channel_id}, response=${response_body}"
+        return 1
+    fi
 }
 
 declare -A DISABLED_UNTIL
