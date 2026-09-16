@@ -201,6 +201,59 @@ type RecordConsumeLogParams struct {
 	Other            map[string]interface{} `json:"other"`
 }
 
+// extractClientMetadata extracts Codex/OpenCode metadata from the incoming request.
+// Missing scalar fields are persisted as empty strings and missing workspaces as an
+// empty object so the JSON shape remains stable.
+func extractClientMetadata(c *gin.Context) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"installation_id": "",
+		"originator":      c.GetHeader("originator"),
+		"user_agent":      c.GetHeader("User-Agent"),
+		"session_id":      c.GetHeader("session-id"),
+		"sandbox":         "",
+		"workspaces":      map[string]interface{}{},
+	}
+	if metadata["session_id"] == "" {
+		metadata["session_id"] = c.GetHeader("x-session-id")
+	}
+
+	var turnMetadata map[string]interface{}
+	if err := common.UnmarshalJsonStr(c.GetHeader("x-codex-turn-metadata"), &turnMetadata); err != nil {
+		return metadata
+	}
+	if value, ok := turnMetadata["installation_id"].(string); ok {
+		metadata["installation_id"] = value
+	}
+	if value, ok := turnMetadata["sandbox"].(string); ok {
+		metadata["sandbox"] = value
+	}
+	if value, ok := turnMetadata["workspaces"].(map[string]interface{}); ok {
+		metadata["workspaces"] = extractWorkspaceRemoteURLs(value)
+	}
+	return metadata
+}
+
+func extractWorkspaceRemoteURLs(workspaces map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(workspaces))
+	for path, rawWorkspace := range workspaces {
+		workspace, ok := rawWorkspace.(map[string]interface{})
+		if !ok {
+			result[path] = map[string]interface{}{"remote_urls": map[string]interface{}{}}
+			continue
+		}
+		remoteURLs := map[string]interface{}{}
+		if associated, ok := workspace["associated_remote_urls"].(map[string]interface{}); ok {
+			for name, url := range associated {
+				if value, ok := url.(string); ok {
+					remoteURLs[name] = value
+				}
+			}
+		}
+		result[path] = map[string]interface{}{"remote_urls": remoteURLs}
+	}
+	return result
+}
+
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
 	if !common.LogConsumeEnabled {
 		return
@@ -208,6 +261,10 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
+	if params.Other == nil {
+		params.Other = make(map[string]interface{})
+	}
+	params.Other["client_metadata"] = extractClientMetadata(c)
 	otherStr := common.MapToJsonStr(params.Other)
 	// 判断是否需要记录 IP
 	needRecordIp := false
